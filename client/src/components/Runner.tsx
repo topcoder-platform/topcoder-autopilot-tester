@@ -116,6 +116,137 @@ const stringifyValue = (value: unknown): string => {
   }
 };
 
+const stringifyValueForCopy = (value: unknown): string => {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+};
+
+function CopyButton({ value, label }: { value?: string | null; label: string }) {
+  const [isCopied, setIsCopied] = useState(false);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const canCopy = typeof value === 'string' && value.trim().length > 0;
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-flex' }}>
+      <button
+        type="button"
+        disabled={!canCopy}
+        onClick={() => {
+          if (!canCopy) return;
+          const textToCopy = value ?? '';
+          const markCopied = () => {
+            setIsCopied(true);
+            if (timeoutRef.current) clearTimeout(timeoutRef.current);
+            timeoutRef.current = setTimeout(() => {
+              setIsCopied(false);
+              timeoutRef.current = null;
+            }, 1500);
+          };
+
+          const clipboard = navigator.clipboard;
+          if (clipboard?.writeText) {
+            clipboard.writeText(textToCopy).then(markCopied).catch(() => {
+              /* ignore clipboard errors */
+            });
+            return;
+          }
+
+          try {
+            const textarea = document.createElement('textarea');
+            textarea.value = textToCopy;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            textarea.style.pointerEvents = 'none';
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            const copied = document.execCommand('copy');
+            document.body.removeChild(textarea);
+            if (copied) markCopied();
+          } catch {
+            /* ignore clipboard errors */
+          }
+        }}
+        title={label}
+        aria-label={label}
+        style={{
+          border: '1px solid #1f2937',
+          background: '#1e293b',
+          color: '#f8fafc',
+          padding: '4px 6px',
+          borderRadius: 6,
+          cursor: canCopy ? 'pointer' : 'not-allowed',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          opacity: canCopy ? 1 : 0.6
+        }}
+      >
+        <svg
+          aria-hidden="true"
+          focusable="false"
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          style={{ display: 'block' }}
+        >
+          <path
+            d="M8 3H17L21 7V21H8V3Z"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M3 3H8V21H3V3Z"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+      {isCopied ? (
+        <span
+          role="status"
+          style={{
+            position: 'absolute',
+            bottom: '100%',
+            right: 0,
+            transform: 'translateY(-6px)',
+            background: '#0b1220',
+            color: '#e2e8f0',
+            border: '1px solid #1e293b',
+            borderRadius: 6,
+            padding: '4px 6px',
+            fontSize: 11,
+            whiteSpace: 'nowrap',
+            boxShadow: '0 4px 12px rgba(15, 23, 42, 0.45)'
+          }}
+        >
+          Copied
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep?: string }) {
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -261,6 +392,17 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
   };
 
   const requestEntries = openStep ? stepRequests[openStep] ?? [] : [];
+  const selectedRequestItem = selectedRequest?.item;
+  const selectedEndpointDisplay = selectedRequestItem?.endpoint || 'Unknown';
+  const selectedEndpointCopyValue = selectedRequestItem?.endpoint ?? '';
+  const selectedRequestBodyDisplay = stringifyValue(selectedRequestItem?.requestBody);
+  const selectedRequestBodyCopyValue = stringifyValueForCopy(selectedRequestItem?.requestBody);
+  const selectedResponseBodyDisplay = stringifyValue(selectedRequestItem?.responseBody);
+  const selectedResponseBodyCopyValue = stringifyValueForCopy(selectedRequestItem?.responseBody);
+  const selectedResponseHeadersDisplay = selectedRequestItem?.responseHeaders
+    ? stringifyValue(selectedRequestItem.responseHeaders)
+    : '';
+  const selectedResponseHeadersCopyValue = stringifyValueForCopy(selectedRequestItem?.responseHeaders);
 
   return (
     <>
@@ -314,7 +456,7 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                       {ui.label}
                       <span style={{
                         padding: '2px 6px',
-                        borderRadius: 999,
+                        borderRadius: 4,
                         background: '#1e293b',
                         color: '#cbd5f5',
                         fontSize: 11,
@@ -325,7 +467,7 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                       {failureCount > 0 ? (
                         <span style={{
                           padding: '2px 6px',
-                          borderRadius: 999,
+                          borderRadius: 4,
                           background: '#7f1d1d',
                           color: '#fee2e2',
                           fontSize: 11,
@@ -634,8 +776,11 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
             </div>
             <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
               <div>
-                <span style={{ fontSize: 12, color: '#94a3b8' }}>Endpoint</span>
-                <div style={{ fontWeight: 600 }}>{selectedRequest.item.endpoint || 'Unknown'}</div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ fontSize: 12, color: '#94a3b8' }}>Endpoint</span>
+                  <CopyButton value={selectedEndpointCopyValue} label="Copy endpoint" />
+                </div>
+                <div style={{ fontWeight: 600 }}>{selectedEndpointDisplay}</div>
               </div>
               <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
                 <div>
@@ -672,7 +817,10 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                 </div>
               ) : null}
               <div>
-                <span style={{ fontSize: 12, color: '#94a3b8' }}>Request body</span>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ fontSize: 12, color: '#94a3b8' }}>Request body</span>
+                  <CopyButton value={selectedRequestBodyCopyValue} label="Copy request body" />
+                </div>
                 <pre
                   style={{
                     background: '#111c30',
@@ -682,11 +830,14 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                     overflowX: 'auto'
                   }}
                 >
-                  {stringifyValue(selectedRequest.item.requestBody)}
+                  {selectedRequestBodyDisplay}
                 </pre>
               </div>
               <div>
-                <span style={{ fontSize: 12, color: '#94a3b8' }}>Response body</span>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ fontSize: 12, color: '#94a3b8' }}>Response body</span>
+                  <CopyButton value={selectedResponseBodyCopyValue} label="Copy response body" />
+                </div>
                 <pre
                   style={{
                     background: '#111c30',
@@ -696,12 +847,15 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                     overflowX: 'auto'
                   }}
                 >
-                  {stringifyValue(selectedRequest.item.responseBody)}
+                  {selectedResponseBodyDisplay}
                 </pre>
               </div>
               {selectedRequest.item.responseHeaders ? (
                 <div>
-                  <span style={{ fontSize: 12, color: '#94a3b8' }}>Response headers</span>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ fontSize: 12, color: '#94a3b8' }}>Response headers</span>
+                    <CopyButton value={selectedResponseHeadersCopyValue} label="Copy response headers" />
+                  </div>
                   <pre
                     style={{
                       background: '#111c30',
@@ -711,7 +865,7 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                       overflowX: 'auto'
                     }}
                   >
-                    {stringifyValue(selectedRequest.item.responseHeaders)}
+                    {selectedResponseHeadersDisplay}
                   </pre>
                 </div>
               ) : null}
