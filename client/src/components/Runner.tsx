@@ -10,7 +10,7 @@ type StepName =
   | 'createAppeals' | 'awaitAppealsResponseOpen' | 'appealResponses'
   | 'awaitAllClosed' | 'awaitCompletion';
 type StepStatus = 'pending' | 'in-progress' | 'success' | 'failure';
-type StepRequestFailure = {
+type StepRequestLog = {
   id: string;
   method?: string;
   endpoint?: string;
@@ -20,15 +20,18 @@ type StepRequestFailure = {
   responseBody?: unknown;
   responseHeaders?: Record<string, unknown>;
   timestamp?: string;
+  durationMs?: number;
+  outcome: 'success' | 'failure';
 };
 type StepEvent = {
   type: 'step';
   step: StepName;
   status: StepStatus;
-  failedRequests?: StepRequestFailure[];
+  requests?: StepRequestLog[];
+  failedRequests?: StepRequestLog[];
   timestamp: string;
 };
-type StepFailureMap = Partial<Record<StepName, StepRequestFailure[]>>;
+type StepRequestMap = Partial<Record<StepName, StepRequestLog[]>>;
 
 const STEPS: StepName[] = [
   'token','createChallenge','updateDraft','activate',
@@ -123,9 +126,10 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
   const [lastRefreshTimestamp, setLastRefreshTimestamp] = useState<string | null>(null);
   const [runToken, setRunToken] = useState(0);
   const [stepStatuses, setStepStatuses] = useState<Record<StepName, StepStatus>>(buildInitialStepStatuses);
-  const [stepFailures, setStepFailures] = useState<StepFailureMap>({});
+  const [stepFailures, setStepFailures] = useState<StepRequestMap>({});
+  const [stepRequests, setStepRequests] = useState<StepRequestMap>({});
   const [openStep, setOpenStep] = useState<StepName | null>(null);
-  const [selectedFailure, setSelectedFailure] = useState<{ step: StepName; item: StepRequestFailure } | null>(null);
+  const [selectedRequest, setSelectedRequest] = useState<{ step: StepName; item: StepRequestLog } | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const sourceRef = useRef<EventSource | null>(null);
   const snapshotCounterRef = useRef(0);
@@ -142,19 +146,24 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
 
     const handleStepEvent = (event: StepEvent) => {
       setStepStatuses(prev => ({ ...prev, [event.step]: event.status }));
-      if (event.status === 'failure') {
+      if (event.requests !== undefined) {
+        setStepRequests(prev => ({ ...prev, [event.step]: event.requests ?? [] }));
+        setSelectedRequest(prev => {
+          if (!prev || prev.step !== event.step) return prev;
+          const updated = (event.requests ?? []).find(r => r.id === prev.item.id);
+          if (!updated) return null;
+          return { step: event.step, item: updated };
+        });
+      }
+      if (event.failedRequests !== undefined) {
         setStepFailures(prev => ({ ...prev, [event.step]: event.failedRequests ?? [] }));
-      } else {
+      } else if (event.status !== 'failure') {
         setStepFailures(prev => {
           if (!(event.step in prev)) return prev;
-          const next = { ...prev } as StepFailureMap;
+          const next = { ...prev } as StepRequestMap;
           delete next[event.step];
           return next;
         });
-      }
-      if (event.status !== 'failure') {
-        setOpenStep(prev => (prev === event.step ? null : prev));
-        setSelectedFailure(prev => (prev?.step === event.step ? null : prev));
       }
     };
 
@@ -245,12 +254,13 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
     setProgress(0);
     setStepStatuses(buildInitialStepStatuses());
     setStepFailures({});
+    setStepRequests({});
     setOpenStep(null);
-    setSelectedFailure(null);
+    setSelectedRequest(null);
     setRunToken(prev => prev + 1);
   };
 
-  const failureRequests = openStep ? stepFailures[openStep] ?? [] : [];
+  const requestEntries = openStep ? stepRequests[openStep] ?? [] : [];
 
   return (
     <>
@@ -268,16 +278,18 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
               {STEPS.map(step => {
                 const status = stepStatuses[step];
                 const ui = STATUS_UI[status];
-                const isFailure = status === 'failure';
+                const requestsForStep = stepRequests[step] ?? [];
+                const allowOpen = status !== 'pending' || requestsForStep.length > 0;
+                const failureCount = (stepFailures[step] ?? []).length;
                 return (
                   <button
                     key={step}
                     type="button"
-                    disabled={!isFailure}
+                    disabled={!allowOpen}
                     onClick={() => {
-                      if (!isFailure) return;
+                      if (!allowOpen) return;
                       setOpenStep(step);
-                      setSelectedFailure(null);
+                      setSelectedRequest(null);
                     }}
                     style={{
                       display: 'flex',
@@ -289,8 +301,8 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                       border: '1px solid #1f2937',
                       background: '#0f172a',
                       color: '#e2e8f0',
-                      cursor: isFailure ? 'pointer' : 'default',
-                      opacity: isFailure ? 1 : 0.9,
+                      cursor: allowOpen ? 'pointer' : 'default',
+                      opacity: allowOpen ? 1 : 0.8,
                       textAlign: 'left'
                     }}
                   >
@@ -298,7 +310,31 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                       <span style={{ color: ui.color, fontWeight: 700, fontSize: 18, lineHeight: 1 }}>{ui.icon}</span>
                       <span style={{ fontWeight: 500 }}>{formatStepTitle(step)}</span>
                     </span>
-                    <span style={{ fontSize: 12, color: '#94a3b8' }}>{ui.label}</span>
+                    <span style={{ fontSize: 12, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {ui.label}
+                      <span style={{
+                        padding: '2px 6px',
+                        borderRadius: 999,
+                        background: '#1e293b',
+                        color: '#cbd5f5',
+                        fontSize: 11,
+                        fontWeight: 600
+                      }}>
+                        {requestsForStep.length} call{requestsForStep.length === 1 ? '' : 's'}
+                      </span>
+                      {failureCount > 0 ? (
+                        <span style={{
+                          padding: '2px 6px',
+                          borderRadius: 999,
+                          background: '#7f1d1d',
+                          color: '#fee2e2',
+                          fontSize: 11,
+                          fontWeight: 600
+                        }}>
+                          {failureCount} error{failureCount === 1 ? '' : 's'}
+                        </span>
+                      ) : null}
+                    </span>
                   </button>
                 );
               })}
@@ -456,14 +492,14 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
               <div>
-                <h3 style={{ margin: 0 }}>Failed requests</h3>
+                <h3 style={{ margin: 0 }}>Step requests</h3>
                 <p style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 14 }}>{formatStepTitle(openStep)}</p>
               </div>
               <button
                 type="button"
                 onClick={() => {
                   setOpenStep(null);
-                  setSelectedFailure(null);
+                  setSelectedRequest(null);
                 }}
                 style={{
                   border: '1px solid #1f2937',
@@ -477,16 +513,18 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                 Close
               </button>
             </div>
-            {failureRequests.length === 0 ? (
-              <p style={{ marginTop: 16, color: '#94a3b8' }}>No failed request details were captured for this step.</p>
+            {requestEntries.length === 0 ? (
+              <p style={{ marginTop: 16, color: '#94a3b8' }}>No requests were captured for this step yet.</p>
             ) : (
               <ul style={{ listStyle: 'none', padding: 0, margin: '16px 0 0', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                {failureRequests.map((failure) => {
-                  const summaryParts = [failure.method, failure.endpoint].filter(Boolean).join(' ');
-                  const statusLabel = failure.status !== undefined ? `Status ${failure.status}` : 'Status unknown';
+                {requestEntries.map((request) => {
+                  const summaryParts = [request.method, request.endpoint].filter(Boolean).join(' ');
+                  const statusLabel = request.status !== undefined ? String(request.status) : '—';
+                  const statusColor = request.outcome === 'failure' ? '#f87171' : '#34d399';
+                  const timestampLabel = request.timestamp ? new Date(request.timestamp).toLocaleTimeString() : null;
                   return (
                     <li
-                      key={failure.id}
+                      key={request.id}
                       style={{
                         border: '1px solid #1f2937',
                         borderRadius: 8,
@@ -499,15 +537,32 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                       }}
                     >
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        <span style={{ fontWeight: 600 }}>{summaryParts || failure.message || 'Request'}</span>
-                        <span style={{ fontSize: 12, color: '#94a3b8' }}>
-                          {statusLabel}
-                          {failure.message ? ` • ${failure.message}` : ''}
+                        <span style={{ fontWeight: 600 }}>{summaryParts || request.message || 'Request'}</span>
+                        <span style={{ fontSize: 12, color: '#94a3b8', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              minWidth: 30,
+                              padding: '2px 6px',
+                              borderRadius: 6,
+                              background: '#1f2937',
+                              color: statusColor,
+                              fontWeight: 600
+                            }}>
+                              {statusLabel}
+                            </span>
+                            <span style={{ color: statusColor, fontWeight: 600 }}>{request.outcome === 'failure' ? 'Failure' : 'Success'}</span>
+                          </span>
+                          {timestampLabel ? <span>{timestampLabel}</span> : null}
+                          {typeof request.durationMs === 'number' ? <span>{request.durationMs}ms</span> : null}
+                          {request.message ? <span>{request.message}</span> : null}
                         </span>
                       </div>
                       <button
                         type="button"
-                        onClick={() => setSelectedFailure({ step: openStep, item: failure })}
+                        onClick={() => setSelectedRequest({ step: openStep, item: request })}
                         style={{
                           border: '1px solid #1f2937',
                           background: '#1e293b',
@@ -528,7 +583,7 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
           </div>
         </div>
       ) : null}
-      {selectedFailure ? (
+      {selectedRequest ? (
         <div
           style={{
             position: 'fixed',
@@ -560,11 +615,11 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
               <div>
                 <h3 style={{ margin: 0 }}>Request details</h3>
-                <p style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 14 }}>{formatStepTitle(selectedFailure.step)}</p>
+                <p style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 14 }}>{formatStepTitle(selectedRequest.step)}</p>
               </div>
               <button
                 type="button"
-                onClick={() => setSelectedFailure(null)}
+                onClick={() => setSelectedRequest(null)}
                 style={{
                   border: '1px solid #1f2937',
                   background: '#1e293b',
@@ -580,22 +635,40 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
             <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
               <div>
                 <span style={{ fontSize: 12, color: '#94a3b8' }}>Endpoint</span>
-                <div style={{ fontWeight: 600 }}>{selectedFailure.item.endpoint || 'Unknown'}</div>
+                <div style={{ fontWeight: 600 }}>{selectedRequest.item.endpoint || 'Unknown'}</div>
               </div>
               <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
                 <div>
                   <span style={{ fontSize: 12, color: '#94a3b8' }}>Method</span>
-                  <div style={{ fontWeight: 600 }}>{selectedFailure.item.method || 'Unknown'}</div>
+                  <div style={{ fontWeight: 600 }}>{selectedRequest.item.method || 'Unknown'}</div>
                 </div>
                 <div>
                   <span style={{ fontSize: 12, color: '#94a3b8' }}>Status code</span>
-                  <div style={{ fontWeight: 600 }}>{selectedFailure.item.status ?? 'Unknown'}</div>
+                  <div style={{ fontWeight: 600 }}>{selectedRequest.item.status ?? 'Unknown'}</div>
                 </div>
               </div>
-              {selectedFailure.item.message ? (
+              <div>
+                <span style={{ fontSize: 12, color: '#94a3b8' }}>Outcome</span>
+                <div style={{ fontWeight: 600, color: selectedRequest.item.outcome === 'failure' ? '#f87171' : '#34d399' }}>
+                  {selectedRequest.item.outcome === 'failure' ? 'Failure' : 'Success'}
+                </div>
+              </div>
+              {selectedRequest.item.message ? (
                 <div>
                   <span style={{ fontSize: 12, color: '#94a3b8' }}>Message</span>
-                  <div>{selectedFailure.item.message}</div>
+                  <div>{selectedRequest.item.message}</div>
+                </div>
+              ) : null}
+              {typeof selectedRequest.item.durationMs === 'number' ? (
+                <div>
+                  <span style={{ fontSize: 12, color: '#94a3b8' }}>Duration</span>
+                  <div>{selectedRequest.item.durationMs}ms</div>
+                </div>
+              ) : null}
+              {selectedRequest.item.timestamp ? (
+                <div>
+                  <span style={{ fontSize: 12, color: '#94a3b8' }}>Timestamp</span>
+                  <div>{new Date(selectedRequest.item.timestamp).toLocaleString()}</div>
                 </div>
               ) : null}
               <div>
@@ -609,7 +682,7 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                     overflowX: 'auto'
                   }}
                 >
-                  {stringifyValue(selectedFailure.item.requestBody)}
+                  {stringifyValue(selectedRequest.item.requestBody)}
                 </pre>
               </div>
               <div>
@@ -623,10 +696,10 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                     overflowX: 'auto'
                   }}
                 >
-                  {stringifyValue(selectedFailure.item.responseBody)}
+                  {stringifyValue(selectedRequest.item.responseBody)}
                 </pre>
               </div>
-              {selectedFailure.item.responseHeaders ? (
+              {selectedRequest.item.responseHeaders ? (
                 <div>
                   <span style={{ fontSize: 12, color: '#94a3b8' }}>Response headers</span>
                   <pre
@@ -638,7 +711,7 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
                       overflowX: 'auto'
                     }}
                   >
-                    {stringifyValue(selectedFailure.item.responseHeaders)}
+                    {stringifyValue(selectedRequest.item.responseHeaders)}
                   </pre>
                 </div>
               ) : null}

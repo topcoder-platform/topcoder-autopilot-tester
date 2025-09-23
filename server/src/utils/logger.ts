@@ -5,7 +5,7 @@ export type LogEvent = { level: 'info' | 'warn' | 'error' ; message: string; dat
 
 export type StepStatus = 'pending' | 'in-progress' | 'success' | 'failure';
 
-export type StepRequestFailure = {
+export type StepRequestLog = {
   id: string;
   method?: string;
   endpoint?: string;
@@ -14,13 +14,17 @@ export type StepRequestFailure = {
   requestBody?: unknown;
   responseBody?: unknown;
   responseHeaders?: Record<string, unknown>;
+  timestamp?: string;
+  durationMs?: number;
+  outcome: 'success' | 'failure';
 };
 
 export type StepEvent = {
   type: 'step';
   step: string;
   status: StepStatus;
-  failedRequests?: StepRequestFailure[];
+  requests?: StepRequestLog[];
+  failedRequests?: StepRequestLog[];
   timestamp: string;
 };
 
@@ -32,12 +36,19 @@ export class RunnerLogger extends EventEmitter {
   warn(message: string, data?: any, progress?: number) { this.log('warn', message, data, progress); }
   error(message: string, data?: any, progress?: number) { this.log('error', message, data, progress); }
 
-  step(event: { step: string; status: StepStatus; failedRequests?: StepRequestFailure[]; timestamp?: string }) {
+  step(event: {
+    step: string;
+    status: StepStatus;
+    requests?: StepRequestLog[];
+    failedRequests?: StepRequestLog[];
+    timestamp?: string;
+  }) {
     const payload: StepEvent = {
       type: 'step',
       step: event.step,
       status: event.status,
       timestamp: event.timestamp ?? new Date().toISOString(),
+      requests: event.requests,
       failedRequests: event.failedRequests
     };
     this.emit('step', payload);

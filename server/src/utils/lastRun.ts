@@ -8,12 +8,22 @@ const __dirname = path.dirname(__filename);
 const dataDir = path.resolve(__dirname, '../../data');
 const filePath = path.join(dataDir, 'last-run.json');
 
+export type ChallengeResource = {
+  id: string;
+  memberId?: string;
+  memberHandle?: string;
+  roleId?: string;
+};
+
 export type LastRun = {
   challengeId?: string;
   challengeName?: string;
   submissions?: { [submitterHandle: string]: string[] }; // list of submission IDs by handle
   reviews?: { [key: string]: string }; // `${reviewerHandle}:${submitterHandle}:${submissionId}` -> reviewId
   appeals?: string[]; // appeal ids
+  reviewerResources?: { [handle: string]: string }; // reviewer handle -> resource id
+  challengeResources?: ChallengeResource[]; // resources fetched from challenge API
+  resourceRoleIds?: { [roleName: string]: string }; // cached resource role IDs by name
 };
 
 export function readLastRun(): LastRun {

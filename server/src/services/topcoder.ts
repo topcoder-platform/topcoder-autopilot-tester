@@ -3,6 +3,7 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { recordStepRequest } from '../utils/stepRequestRecorder.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,6 +16,17 @@ type M2MSecrets = {
 };
 let cachedToken: { token: string; exp: number } | null = null;
 
+const METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH']);
+
+function normalizeRequestBody(data: unknown) {
+  if (typeof data !== 'string') return data;
+  try {
+    return JSON.parse(data);
+  } catch {
+    return data;
+  }
+}
+
 export async function getToken(): Promise<string> {
   const secretPath = path.resolve(__dirname, '../../secrets/m2m.json');
   if (!fs.existsSync(secretPath)) {
@@ -24,18 +36,48 @@ export async function getToken(): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   if (cachedToken && cachedToken.exp - 60 > now) return cachedToken.token;
 
-  const { data } = await axios.post(secrets.tokenUrl, {
+  const payload = {
     fresh_token: true,
     client_id: secrets.clientId,
     client_secret: secrets.clientSecret,
     audience: secrets.audience,
     grant_type: 'client_credentials'
-  }, { headers: { 'content-type': 'application/json' } });
+  };
 
-  const token = data.access_token;
-  const decoded = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString('utf-8'));
-  cachedToken = { token, exp: decoded.exp || (now + 3600) };
-  return token;
+  try {
+    const response = await axios.post(secrets.tokenUrl, payload, { headers: { 'content-type': 'application/json' } });
+    recordStepRequest({
+      method: 'POST',
+      endpoint: secrets.tokenUrl,
+      status: response.status,
+      requestBody: payload,
+      responseBody: response.data,
+      responseHeaders: response.headers,
+      timestamp: new Date().toISOString(),
+      outcome: 'success'
+    });
+    const token = response.data.access_token;
+    const decoded = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString('utf-8'));
+    cachedToken = { token, exp: decoded.exp || (now + 3600) };
+    return token;
+  } catch (error: any) {
+    const response = error?.response;
+    const recorded = recordStepRequest({
+      method: 'POST',
+      endpoint: secrets.tokenUrl,
+      status: response?.status,
+      message: error?.message,
+      requestBody: payload,
+      responseBody: response?.data,
+      responseHeaders: response?.headers,
+      timestamp: new Date().toISOString(),
+      outcome: 'failure'
+    });
+    if (recorded) {
+      (error as any).__stepRequestId = recorded.id;
+    }
+    throw error;
+  }
 }
 
 export function axiosWithAuth(token: string) {
@@ -65,13 +107,24 @@ export function axiosWithAuth(token: string) {
   });
 
   ax.interceptors.response.use((response) => {
-    const { config, status, statusText, data } = response;
+    const { config, status, statusText, data, headers } = response;
     const method = config.method?.toUpperCase() || 'GET';
     const url = config.url || 'unknown-url';
     const startedAt = (config as any).__requestStart;
     const durationMs = typeof startedAt === 'number' ? Date.now() - startedAt : undefined;
     console.log(`[Topcoder API] ← ${method} ${url} ${status} ${statusText || ''}${durationMs !== undefined ? ` (${durationMs}ms)` : ''}`, {
       data
+    });
+    recordStepRequest({
+      method,
+      endpoint: url,
+      status,
+      requestBody: METHODS_WITH_BODY.has(method) ? normalizeRequestBody(config.data) : undefined,
+      responseBody: data,
+      responseHeaders: headers,
+      durationMs,
+      timestamp: new Date().toISOString(),
+      outcome: 'success'
     });
     return response;
   }, (error) => {
@@ -86,6 +139,21 @@ export function axiosWithAuth(token: string) {
       data: error?.response?.data,
       message: error?.message
     });
+    const recorded = recordStepRequest({
+      method,
+      endpoint: url,
+      status,
+      message: error?.message,
+      requestBody: METHODS_WITH_BODY.has(method) ? normalizeRequestBody(cfg.data) : undefined,
+      responseBody: error?.response?.data,
+      responseHeaders: error?.response?.headers,
+      durationMs,
+      timestamp: new Date().toISOString(),
+      outcome: 'failure'
+    });
+    if (recorded) {
+      (error as any).__stepRequestId = recorded.id;
+    }
     return Promise.reject(error);
   });
   return ax;
@@ -121,6 +189,11 @@ export const TC = {
   async listResourceRoles(token: string) {
     const ax = axiosWithAuth(token);
     const { data } = await ax.get('https://api.topcoder-dev.com/v6/resource-roles');
+    return data;
+  },
+  async listResources(token: string, params: { challengeId: string }) {
+    const ax = axiosWithAuth(token);
+    const { data } = await ax.get('https://api.topcoder-dev.com/v6/resources', { params });
     return data;
   },
   async addResource(token: string, payload: any) {
