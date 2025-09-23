@@ -24,7 +24,7 @@ Copy the sample file:
 ```bash
 cp server/secrets/m2m.sample.json server/secrets/m2m.json
 ```
-Edit `m2m.json` with your **Client ID** and **Client Secret**:
+Edit `m2m.json` with your Client ID and Client Secret:
 
 ```json
 {
@@ -53,30 +53,30 @@ pnpm run dev
   - Full challenge lifecycle steps:
     1. Generate M2M token
     2. Create → Draft → Activate challenge
-    3. Monitor **Registration** & **Submission** phases
+    3. Monitor Registration** & Submission phases
     4. Assign copilot, reviewers, and submitters
     5. Add submissions
     6. Wait for phases → Review → Appeals → Appeals Response
     7. Auto-generate reviews with randomized answers/comments
     8. Create appeals & randomized responses
-    9. Track phase transitions (with **15s grace tolerance**)
-    10. Verify **challenge completion** & winner assignment
+    9. Track phase transitions (with 15s grace tolerance)
+    10. Verify challenge completion & winner assignment
   - **Run full flow** or **stop at a chosen step**.
 
 - **Persistence**
-  - Saves **challenge ID**, **submission IDs**, **review IDs**, and **appeal IDs** to `server/data/last-run.json` for reuse/debugging.
+  - Saves challenge ID, submission IDs, review IDs, and appeal IDs to `server/data/last-run.json` for reuse/debugging.
 
 - **UI**
   - Config display & editor
   - Run actions:
     - Run full flow
     - Run to a specific step
-  - Live **progress bar**
-  - Streaming **log viewer** with request/response details
+  - Live progress bar
+  - Streaming log viewer with request/response details
 
 ### Edit Configuration
 
-- Navigate to the UI and click **Edit configuration**.
+- Navigate to the UI and click _Edit configuration_.
 - Select challenge type, track, scorecard, set handles, submissions count, and prizes.
 - Save to persist into `server/data/config.json`.
 
