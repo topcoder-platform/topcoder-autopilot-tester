@@ -1,7 +1,7 @@
 
 # Topcoder Autopilot Tester
 
-A Node.js + TypeScript web app that automates and validates the *utopilot service flow for Topcoder’s v6 APIs.  The app creates, runs, and monitors a challenge end-to-end, while providing a GUI for configuration, progress tracking, and live logs.
+A Node.js + TypeScript web app that automates and validates the autopilot service flow for Topcoder’s v6 APIs.  The app creates, runs, and monitors a challenge end-to-end, while providing a GUI for configuration, progress tracking, and live logs.
 
 The challenge is created using a timeline template that has 1 minute phases for:  registration, submission, review, appeals, and appeals response.  Registration and submission will be scheduled to open immediately and close at the same time.
 
