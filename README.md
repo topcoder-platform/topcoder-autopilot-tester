@@ -14,8 +14,8 @@ The challenge is created using a timeline template that has 1 minute phases for:
 ### Install dependencies
 
 ```bash
-npm install
-npm run install:all
+pnpm install
+pnpm run install:all
 ```
 
 
@@ -38,7 +38,7 @@ Edit `m2m.json` with your **Client ID** and **Client Secret**:
 **This file is ignored by git and must never be committed.**
 
 ```bash
-npm run dev
+pnpm run dev
 ```
 
 - Server: http://localhost:5055  
