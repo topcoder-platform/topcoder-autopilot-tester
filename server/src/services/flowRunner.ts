@@ -1,7 +1,7 @@
 
 import dayjs from 'dayjs';
 import { nanoid } from 'nanoid';
-import { RunnerLogger, type StepRequestFailure } from '../utils/logger.js';
+import { RunnerLogger, type StepRequestFailure, type StepStatus } from '../utils/logger.js';
 import { getToken, TC } from './topcoder.js';
 
 type CancellationHelpers = {
@@ -110,6 +110,12 @@ function logChallengeSnapshot(log: RunnerLogger, stage: string, challenge: any) 
   log.info('Challenge refresh', { stage, challenge });
 }
 
+type StepContext = {
+  recordFailure: (error: any, overrides?: Partial<StepRequestFailure>) => StepRequestFailure;
+  recordFailureDetail: (detail: StepRequestFailure) => StepRequestFailure;
+  getFailures: () => StepRequestFailure[];
+};
+
 function initializeStepStatuses(log: RunnerLogger) {
   for (const step of STEPS) {
     log.step({ step, status: 'pending' });
@@ -148,16 +154,42 @@ function extractStepFailure(error: any): StepRequestFailure {
 async function withStep<T>(
   log: RunnerLogger,
   step: StepName,
-  runner: () => Promise<T>
+  runner: (ctx: StepContext) => Promise<T>
 ): Promise<T> {
-  log.step({ step, status: 'in-progress' });
+  const failures: StepRequestFailure[] = [];
+
+  const emit = (status: StepStatus) => {
+    log.step({ step, status, failedRequests: failures.length ? [...failures] : undefined });
+  };
+
+  const stepCtx: StepContext = {
+    recordFailure: (error: any, overrides?: Partial<StepRequestFailure>) => {
+      const failure: StepRequestFailure = { ...extractStepFailure(error), ...(overrides ?? {}) };
+      failures.push(failure);
+      emit('failure');
+      return failure;
+    },
+    recordFailureDetail: (detail: StepRequestFailure) => {
+      const failure: StepRequestFailure = { ...detail };
+      if (!failure.id) failure.id = nanoid(10);
+      failures.push(failure);
+      emit('failure');
+      return failure;
+    },
+    getFailures: () => [...failures]
+  };
+
+  emit('in-progress');
   try {
-    const result = await runner();
-    log.step({ step, status: 'success' });
+    const result = await runner(stepCtx);
+    if (failures.length === 0) {
+      emit('success');
+    } else {
+      emit('failure');
+    }
     return result;
   } catch (error) {
-    const failure = extractStepFailure(error);
-    log.step({ step, status: 'failure', failedRequests: [failure] });
+    stepCtx.recordFailure(error);
     throw error;
   }
 }
@@ -178,54 +210,54 @@ export async function runFlow(
 
   cancel.check();
   maybeStop(mode, toStep, 'token', log);
-  const token = await withStep(log, 'token', () => stepToken(log, cancel));
+  const token = await withStep(log, 'token', (ctx) => stepToken(log, cancel, ctx));
   cancel.check();
   maybeStop(mode, toStep, 'token', log);
-  const challenge = await withStep(log, 'createChallenge', () => stepCreateChallenge(log, token, cfg, cancel));
+  const challenge = await withStep(log, 'createChallenge', (ctx) => stepCreateChallenge(log, token, cfg, cancel, ctx));
   writeLastRun({ challengeId: challenge.id, challengeName: challenge.name });
   cancel.check();
   maybeStop(mode, toStep, 'createChallenge', log);
-  await withStep(log, 'updateDraft', () => stepUpdateDraft(log, token, cfg, challenge.id, cancel));
+  await withStep(log, 'updateDraft', (ctx) => stepUpdateDraft(log, token, cfg, challenge.id, cancel, ctx));
   maybeStop(mode, toStep, 'updateDraft', log);
   cancel.check();
-  await withStep(log, 'activate', () => stepActivate(log, token, challenge.id, cancel));
+  await withStep(log, 'activate', (ctx) => stepActivate(log, token, challenge.id, cancel, ctx));
   maybeStop(mode, toStep, 'activate', log);
 
-  await withStep(log, 'awaitRegSubOpen', () => stepAwaitPhasesOpen(log, token, challenge.id, ['Registration','Submission'], 'awaitRegSubOpen', [], cancel));
+  await withStep(log, 'awaitRegSubOpen', (ctx) => stepAwaitPhasesOpen(log, token, challenge.id, ['Registration','Submission'], 'awaitRegSubOpen', [], cancel, ctx));
   maybeStop(mode, toStep, 'awaitRegSubOpen', log);
   cancel.check();
-  await withStep(log, 'assignResources', () => stepAssignResources(log, token, cfg, challenge.id, cancel));
+  await withStep(log, 'assignResources', (ctx) => stepAssignResources(log, token, cfg, challenge.id, cancel, ctx));
   maybeStop(mode, toStep, 'assignResources', log);
   cancel.check();
-  await withStep(log, 'createSubmissions', () => stepCreateSubmissions(log, token, cfg, challenge.id, cancel));
+  await withStep(log, 'createSubmissions', (ctx) => stepCreateSubmissions(log, token, cfg, challenge.id, cancel, ctx));
   maybeStop(mode, toStep, 'createSubmissions', log);
 
-  await withStep(log, 'awaitReviewOpen', () => stepAwaitPhasesOpen(log, token, challenge.id, ['Review'], 'awaitReviewOpen', ['Registration','Submission'], cancel));
+  await withStep(log, 'awaitReviewOpen', (ctx) => stepAwaitPhasesOpen(log, token, challenge.id, ['Review'], 'awaitReviewOpen', ['Registration','Submission'], cancel, ctx));
   maybeStop(mode, toStep, 'awaitReviewOpen', log);
   cancel.check();
-  const reviewInfo = await withStep(log, 'createReviews', () => stepCreateReviews(log, token, cfg, challenge.id, cancel));
+  const reviewInfo = await withStep(log, 'createReviews', (ctx) => stepCreateReviews(log, token, cfg, challenge.id, cancel, ctx));
   maybeStop(mode, toStep, 'createReviews', log);
 
-  await withStep(log, 'awaitAppealsOpen', () => stepAwaitPhasesOpen(log, token, challenge.id, ['Appeals'], 'awaitAppealsOpen', ['Review'], cancel));
+  await withStep(log, 'awaitAppealsOpen', (ctx) => stepAwaitPhasesOpen(log, token, challenge.id, ['Appeals'], 'awaitAppealsOpen', ['Review'], cancel, ctx));
   maybeStop(mode, toStep, 'awaitAppealsOpen', log);
   cancel.check();
-  const appeals = await withStep(log, 'createAppeals', () => stepCreateAppeals(log, token, cfg, reviewInfo, cancel));
+  const appeals = await withStep(log, 'createAppeals', (ctx) => stepCreateAppeals(log, token, cfg, reviewInfo, cancel, ctx));
   maybeStop(mode, toStep, 'createAppeals', log);
 
-  await withStep(log, 'awaitAppealsResponseOpen', () => stepAwaitPhasesOpen(log, token, challenge.id, ['Appeals Response'], 'awaitAppealsResponseOpen', ['Appeals'], cancel));
+  await withStep(log, 'awaitAppealsResponseOpen', (ctx) => stepAwaitPhasesOpen(log, token, challenge.id, ['Appeals Response'], 'awaitAppealsResponseOpen', ['Appeals'], cancel, ctx));
   maybeStop(mode, toStep, 'awaitAppealsResponseOpen', log);
   cancel.check();
-  await withStep(log, 'appealResponses', () => stepAppealResponses(log, token, cfg, appeals, cancel));
+  await withStep(log, 'appealResponses', (ctx) => stepAppealResponses(log, token, cfg, appeals, cancel, ctx));
   maybeStop(mode, toStep, 'appealResponses', log);
 
-  await withStep(log, 'awaitAllClosed', () => stepAwaitAllClosed(log, token, challenge.id, cancel));
+  await withStep(log, 'awaitAllClosed', (ctx) => stepAwaitAllClosed(log, token, challenge.id, cancel, ctx));
   maybeStop(mode, toStep, 'awaitAllClosed', log);
-  await withStep(log, 'awaitCompletion', () => stepAwaitCompletion(log, token, challenge.id, cancel));
+  await withStep(log, 'awaitCompletion', (ctx) => stepAwaitCompletion(log, token, challenge.id, cancel, ctx));
 
   log.info('Flow complete', { challengeId: challenge.id }, 100);
 }
 
-async function stepToken(log: RunnerLogger, cancel: CancellationHelpers) {
+async function stepToken(log: RunnerLogger, cancel: CancellationHelpers, ctx?: StepContext) {
   cancel.check();
   log.info('Generating M2M token...');
   const token = await getToken();
@@ -238,7 +270,8 @@ async function stepCreateChallenge(
   log: RunnerLogger,
   token: string,
   cfg: FlowConfig,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  ctx?: StepContext
 ) {
   cancel.check();
   log.info('Creating challenge...');
@@ -263,7 +296,8 @@ async function stepUpdateDraft(
   token: string,
   cfg: FlowConfig,
   challengeId: string,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  ctx?: StepContext
 ) {
   cancel.check();
   log.info('Updating challenge to DRAFT with 1-minute timeline...');
@@ -307,7 +341,8 @@ async function stepActivate(
   log: RunnerLogger,
   token: string,
   challengeId: string,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  ctx?: StepContext
 ) {
   cancel.check();
   log.info('Activating challenge...');
@@ -324,7 +359,8 @@ async function stepAwaitPhasesOpen(
   mustOpen: string[],
   progressStep: StepName,
   mustClose: string[] = [],
-  cancel?: CancellationHelpers
+  cancel?: CancellationHelpers,
+  ctx?: StepContext
 ) {
   log.info(`Waiting for phases to open/close: open=${mustOpen.join(', ')} close=${mustClose.join(', ')}`);
   const startWait = Date.now();
@@ -365,7 +401,8 @@ async function stepAssignResources(
   token: string,
   cfg: FlowConfig,
   challengeId: string,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  ctx?: StepContext
 ) {
   cancel.check();
   log.info('Assigning resources (copilot, reviewers, submitters)...');
@@ -442,7 +479,8 @@ async function stepCreateSubmissions(
   token: string,
   cfg: FlowConfig,
   challengeId: string,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  ctx?: StepContext
 ) {
   const { writeLastRun, readLastRun } = await import('../utils/lastRun.js');
 
@@ -484,7 +522,8 @@ async function stepCreateReviews(
   token: string,
   cfg: FlowConfig,
   challengeId: string,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  ctx?: StepContext
 ) {
   const { readLastRun, writeLastRun } = await import('../utils/lastRun.js');
   log.info('Creating reviews for each submission by each reviewer...');
@@ -569,7 +608,6 @@ for (const submitterHandle of cfg.submitters) {
 
 
 const payload = {
-  resourceId: rev.resourceId,
   submissionId,
   scorecardId: cfg.scorecardId,
   typeId: 'REVIEW',
@@ -592,6 +630,7 @@ try {
   log.info('Created review', { reviewer: rev.handle, submitter: submitterHandle, submissionId, reviewId: r.id });
 } catch (e:any) {
   log.warn('Create review failed (check submissionId/phaseId requirements in your env)', { reviewer: rev.handle, submitter: submitterHandle, submissionId, error: e?.message || String(e) });
+  ctx?.recordFailure(e, { requestBody: payload });
 }
 
       }
@@ -606,7 +645,8 @@ async function stepCreateAppeals(
   token: string,
   cfg: FlowConfig,
   reviewInfo: any,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  ctx?: StepContext
 ) {
   const { writeLastRun, readLastRun } = await import('../utils/lastRun.js');
   log.info('Creating random appeals for review items...');
@@ -627,24 +667,23 @@ async function stepCreateAppeals(
           if (!submitterHandle) continue;
           const mem = await TC.getMemberByHandle(token, submitterHandle);
           cancel.check();
+          const payload = {
+            resourceId: String(mem.userId),
+            reviewItemCommentId: c.id,
+            content: `Appeal ${i+1}: We believe this should be adjusted.`
+          };
           try {
-
-const payload = {
-  resourceId: String(mem.userId),
-  reviewItemCommentId: c.id,
-  content: `Appeal ${i+1}: We believe this should be adjusted.`
-};
-log.info('REQ createAppeal', payload);
-const a = await TC.createAppeal(token, payload);
-cancel.check();
-log.info('RES createAppeal', a);
-appeals.push({ appeal: a, review: r, reviewItem: item });
-ap.push(a.id);
-writeLastRun({ appeals: ap });
-log.info('Appeal created', { appealId: a.id, by: submitterHandle });
-
+            log.info('REQ createAppeal', payload);
+            const a = await TC.createAppeal(token, payload);
+            cancel.check();
+            log.info('RES createAppeal', a);
+            appeals.push({ appeal: a, review: r, reviewItem: item });
+            ap.push(a.id);
+            writeLastRun({ appeals: ap });
+            log.info('Appeal created', { appealId: a.id, by: submitterHandle });
           } catch (e:any) {
             log.warn('Create appeal failed', { error: e?.message || String(e) });
+            ctx?.recordFailure(e, { requestBody: payload });
           }
         }
       }
@@ -659,7 +698,8 @@ async function stepAppealResponses(
   token: string,
   cfg: FlowConfig,
   appeals: any[],
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  ctx?: StepContext
 ) {
   log.info('Creating appeal responses and updating scores when successful...');
   for (const entry of appeals) {
@@ -697,10 +737,12 @@ try {
           log.info('Review item score updated', { reviewId: entry.review.id, qId, final });
         } catch (e:any) {
           log.warn('Failed to update review item score (adjust endpoint if needed)', { error: e?.message || String(e) });
+          ctx?.recordFailure(e, { requestBody: { scorecardQuestionId: qId, initialAnswer: initial, finalAnswer: final, reviewId: entry.review.id } });
         }
       }
     } catch (e:any) {
       log.warn('Appeal response failed', { error: e?.message || String(e) });
+      ctx?.recordFailure(e, { requestBody: { appealId: entry.appeal.id, resourceId: entry.review.resourceId, content: success ? 'Appeal accepted. Score adjusted.' : 'Appeal rejected. Score stands.', success } });
     }
   }
   log.info('Appeal responses processed', { count: appeals.length }, getStepProgress('appealResponses'));
@@ -710,7 +752,8 @@ async function stepAwaitAllClosed(
   log: RunnerLogger,
   token: string,
   challengeId: string,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  ctx?: StepContext
 ) {
   log.info('Waiting for all phases to be closed...');
   while (true) {
@@ -728,7 +771,8 @@ async function stepAwaitCompletion(
   log: RunnerLogger,
   token: string,
   challengeId: string,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  ctx?: StepContext
 ) {
   log.info('Waiting for challenge to reach COMPLETED and winners set...');
   while (true) {
