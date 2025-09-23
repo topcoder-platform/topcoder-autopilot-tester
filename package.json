@@ -1,0 +1,14 @@
+{
+  "name": "topcoder-autopilot-tester",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "install:all": "cd server && pnpm i && cd ../client && pnpm i",
+    "dev": "concurrently -n server,client -c cyan,magenta \"pnpm --prefix server run dev\" \"pnpm --prefix client run dev\"",
+    "build": "pnpm --prefix client run build && pnpm --prefix server run build",
+    "start": "pnpm --prefix server start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}

@@ -1,0 +1,651 @@
+
+import React, { useEffect, useRef, useState } from 'react'
+
+type LogEntry = { level: string; message: string; data?: any; progress?: number };
+type ChallengeSnapshot = { id: number; stage?: string; timestamp: string; challenge: any };
+type StepName =
+  | 'token' | 'createChallenge' | 'updateDraft' | 'activate'
+  | 'awaitRegSubOpen' | 'assignResources' | 'createSubmissions'
+  | 'awaitReviewOpen' | 'createReviews' | 'awaitAppealsOpen'
+  | 'createAppeals' | 'awaitAppealsResponseOpen' | 'appealResponses'
+  | 'awaitAllClosed' | 'awaitCompletion';
+type StepStatus = 'pending' | 'in-progress' | 'success' | 'failure';
+type StepRequestFailure = {
+  id: string;
+  method?: string;
+  endpoint?: string;
+  status?: number;
+  message?: string;
+  requestBody?: unknown;
+  responseBody?: unknown;
+  responseHeaders?: Record<string, unknown>;
+  timestamp?: string;
+};
+type StepEvent = {
+  type: 'step';
+  step: StepName;
+  status: StepStatus;
+  failedRequests?: StepRequestFailure[];
+  timestamp: string;
+};
+type StepFailureMap = Partial<Record<StepName, StepRequestFailure[]>>;
+
+const STEPS: StepName[] = [
+  'token','createChallenge','updateDraft','activate',
+  'awaitRegSubOpen','assignResources','createSubmissions',
+  'awaitReviewOpen','createReviews','awaitAppealsOpen',
+  'createAppeals','awaitAppealsResponseOpen','appealResponses',
+  'awaitAllClosed','awaitCompletion'
+];
+
+const STEP_LABELS: Record<StepName, string> = {
+  token: 'Token',
+  createChallenge: 'Create Challenge',
+  updateDraft: 'Update Draft',
+  activate: 'Activate',
+  awaitRegSubOpen: 'Await Reg/Sub Open',
+  assignResources: 'Assign Resources',
+  createSubmissions: 'Create Submissions',
+  awaitReviewOpen: 'Await Review Open',
+  createReviews: 'Create Reviews',
+  awaitAppealsOpen: 'Await Appeals Open',
+  createAppeals: 'Create Appeals',
+  awaitAppealsResponseOpen: 'Await Appeals Response',
+  appealResponses: 'Appeal Responses',
+  awaitAllClosed: 'Await All Closed',
+  awaitCompletion: 'Await Completion'
+};
+
+const formatStepTitle = (step: StepName): string => {
+  const idx = STEPS.indexOf(step);
+  const prefix = idx >= 0 ? `${String(idx + 1).padStart(2, '0')}. ` : '';
+  return `${prefix}${STEP_LABELS[step]}`;
+};
+
+const highlightJson = (value: unknown) => {
+  if (value === undefined) return '';
+  const jsonString = JSON.stringify(value, null, 2);
+  if (!jsonString) return '';
+
+  const escaped = jsonString
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  return escaped.replace(
+    /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)/g,
+    match => {
+      let color = '#bae6fd';
+      if (match.startsWith('"')) {
+        color = match.endsWith(':') ? '#38bdf8' : '#34d399';
+      } else if (match === 'true' || match === 'false') {
+        color = '#facc15';
+      } else if (match === 'null') {
+        color = '#94a3b8';
+      } else {
+        color = '#f97316';
+      }
+      return `<span style="color: ${color}">${match}</span>`;
+    }
+  );
+};
+
+const buildInitialStepStatuses = (): Record<StepName, StepStatus> => {
+  const initial = {} as Record<StepName, StepStatus>;
+  for (const step of STEPS) initial[step] = 'pending';
+  return initial;
+};
+
+const STATUS_UI: Record<StepStatus, { icon: string; color: string; label: string }> = {
+  pending: { icon: '•', color: '#94a3b8', label: 'Pending' },
+  'in-progress': { icon: '…', color: '#f59e0b', label: 'In progress' },
+  success: { icon: '✓', color: '#22c55e', label: 'Success' },
+  failure: { icon: '✕', color: '#ef4444', label: 'Failure' }
+};
+
+const stringifyValue = (value: unknown): string => {
+  if (value === undefined || value === null) return '—';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+};
+
+export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep?: string }) {
+  const [isRunning, setIsRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [challengeSnapshots, setChallengeSnapshots] = useState<ChallengeSnapshot[]>([]);
+  const [challengeId, setChallengeId] = useState<string | null>(null);
+  const [refreshCount, setRefreshCount] = useState(0);
+  const [lastRefreshTimestamp, setLastRefreshTimestamp] = useState<string | null>(null);
+  const [runToken, setRunToken] = useState(0);
+  const [stepStatuses, setStepStatuses] = useState<Record<StepName, StepStatus>>(buildInitialStepStatuses);
+  const [stepFailures, setStepFailures] = useState<StepFailureMap>({});
+  const [openStep, setOpenStep] = useState<StepName | null>(null);
+  const [selectedFailure, setSelectedFailure] = useState<{ step: StepName; item: StepRequestFailure } | null>(null);
+  const logRef = useRef<HTMLDivElement>(null);
+  const sourceRef = useRef<EventSource | null>(null);
+  const snapshotCounterRef = useRef(0);
+  const copyTooltipTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isCopyTooltipVisible, setIsCopyTooltipVisible] = useState(false);
+
+  useEffect(() => {
+    if (runToken === 0) return;
+    const params = new URLSearchParams({ mode });
+    if (toStep) params.set('toStep', toStep);
+    const es = new EventSource(`/api/run/stream?${params.toString()}`);
+    sourceRef.current = es;
+    setIsRunning(true);
+
+    const handleStepEvent = (event: StepEvent) => {
+      setStepStatuses(prev => ({ ...prev, [event.step]: event.status }));
+      if (event.status === 'failure') {
+        setStepFailures(prev => ({ ...prev, [event.step]: event.failedRequests ?? [] }));
+      } else {
+        setStepFailures(prev => {
+          if (!(event.step in prev)) return prev;
+          const next = { ...prev } as StepFailureMap;
+          delete next[event.step];
+          return next;
+        });
+      }
+      if (event.status !== 'failure') {
+        setOpenStep(prev => (prev === event.step ? null : prev));
+        setSelectedFailure(prev => (prev?.step === event.step ? null : prev));
+      }
+    };
+
+    es.onmessage = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.data);
+        if (parsed?.type === 'step') {
+          handleStepEvent(parsed as StepEvent);
+          return;
+        }
+        const data: LogEntry = parsed;
+        if (typeof data.progress === 'number') setProgress(data.progress);
+
+        let shouldLog = true;
+        if (data.message === 'Challenge refresh' && data.data?.challenge) {
+          snapshotCounterRef.current += 1;
+          setRefreshCount(snapshotCounterRef.current);
+          const stage = typeof data.data.stage === 'string' ? data.data.stage : undefined;
+          const currentChallenge = data.data.challenge;
+          const extractedId = (() => {
+            if (!currentChallenge) return null;
+            const idCandidate = currentChallenge.id ?? currentChallenge.challengeId ?? currentChallenge.challenge?.id;
+            if (typeof idCandidate === 'string' || typeof idCandidate === 'number') return String(idCandidate);
+            return null;
+          })();
+          if (extractedId) setChallengeId(extractedId);
+          if (copyTooltipTimeoutRef.current) {
+            clearTimeout(copyTooltipTimeoutRef.current);
+            copyTooltipTimeoutRef.current = null;
+          }
+          setIsCopyTooltipVisible(false);
+          const timestamp = new Date().toISOString();
+          setLastRefreshTimestamp(timestamp);
+          setChallengeSnapshots([{
+            id: snapshotCounterRef.current,
+            stage,
+            timestamp,
+            challenge: currentChallenge
+          }]);
+          shouldLog = false;
+        }
+
+        const normalized = data.message?.toLowerCase?.() || '';
+        if (normalized.includes('run finished') || normalized.includes('run cancelled') || data.level === 'error' || data.progress === 100) {
+          setIsRunning(false);
+        }
+
+        if (shouldLog) setLogs(prev => [...prev, data]);
+        logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+      } catch {
+        // ignore malformed log entries
+      }
+    };
+
+    es.onerror = () => {
+      es.close();
+      if (sourceRef.current === es) sourceRef.current = null;
+      setIsRunning(false);
+    };
+
+    return () => {
+      es.close();
+      if (sourceRef.current === es) sourceRef.current = null;
+    };
+  }, [runToken, mode, toStep]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTooltipTimeoutRef.current) {
+        clearTimeout(copyTooltipTimeoutRef.current);
+        copyTooltipTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  const startRun = () => {
+    if (sourceRef.current) {
+      sourceRef.current.close();
+      sourceRef.current = null;
+    }
+    setIsRunning(false);
+    setLogs([]);
+    setChallengeSnapshots([]);
+    setChallengeId(null);
+    setRefreshCount(0);
+    setLastRefreshTimestamp(null);
+    snapshotCounterRef.current = 0;
+    setProgress(0);
+    setStepStatuses(buildInitialStepStatuses());
+    setStepFailures({});
+    setOpenStep(null);
+    setSelectedFailure(null);
+    setRunToken(prev => prev + 1);
+  };
+
+  const failureRequests = openStep ? stepFailures[openStep] ?? [] : [];
+
+  return (
+    <>
+      <div className="row" style={{ alignItems: 'stretch', flexWrap: 'wrap' }}>
+      <div className="col" style={{ minWidth: 0 }}>
+        <div className="card" style={{ height: '100%' }}>
+          <h3>Run</h3>
+          <div className="progress" style={{marginBottom: 8}}><div className="bar" style={{ width: progress+'%' }} /></div>
+          <div style={{display:'flex', gap:8, marginBottom: 8}}>
+            <button onClick={startRun}>{isRunning ? 'Restart' : 'Start'}</button>
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <h4 style={{ margin: '0 0 8px' }}>Step status</h4>
+            <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+              {STEPS.map(step => {
+                const status = stepStatuses[step];
+                const ui = STATUS_UI[status];
+                const isFailure = status === 'failure';
+                return (
+                  <button
+                    key={step}
+                    type="button"
+                    disabled={!isFailure}
+                    onClick={() => {
+                      if (!isFailure) return;
+                      setOpenStep(step);
+                      setSelectedFailure(null);
+                    }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 8,
+                      padding: '8px 12px',
+                      borderRadius: 8,
+                      border: '1px solid #1f2937',
+                      background: '#0f172a',
+                      color: '#e2e8f0',
+                      cursor: isFailure ? 'pointer' : 'default',
+                      opacity: isFailure ? 1 : 0.9,
+                      textAlign: 'left'
+                    }}
+                  >
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ color: ui.color, fontWeight: 700, fontSize: 18, lineHeight: 1 }}>{ui.icon}</span>
+                      <span style={{ fontWeight: 500 }}>{formatStepTitle(step)}</span>
+                    </span>
+                    <span style={{ fontSize: 12, color: '#94a3b8' }}>{ui.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div ref={logRef} className="log">
+            {logs.map((l,i)=>(
+              <div key={i}>
+                <span>[{l.level.toUpperCase()}]</span> {l.message} {l.data ? <pre style={{display:'inline', marginLeft:6}}>{JSON.stringify(l.data)}</pre> : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="col" style={{ minWidth: 0 }}>
+        <div className="card" style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+            <h3 style={{ marginBottom: 0 }}>Challenge snapshots</h3>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'flex-end', textAlign: 'right', flexWrap: 'wrap' }}>
+              <span style={{ color: '#94a3b8', fontSize: 12 }}>
+                {lastRefreshTimestamp
+                  ? `Last refresh ${new Date(lastRefreshTimestamp).toLocaleString()} • ${refreshCount} refresh${refreshCount === 1 ? '' : 'es'}`
+                  : 'No refreshes yet'}
+              </span>
+              {challengeId ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end', textAlign: 'right' }}>
+                  <span style={{ color: '#94a3b8', fontWeight: 500 }}>ID {challengeId}</span>
+                  <div style={{ position: 'relative', display: 'inline-flex' }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(challengeId);
+                        setIsCopyTooltipVisible(true);
+                        if (copyTooltipTimeoutRef.current) clearTimeout(copyTooltipTimeoutRef.current);
+                        copyTooltipTimeoutRef.current = setTimeout(() => {
+                          setIsCopyTooltipVisible(false);
+                          copyTooltipTimeoutRef.current = null;
+                        }, 2000);
+                      }}
+                      title="Copy challenge ID"
+                      aria-label="Copy challenge ID"
+                      style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '4px 6px' }}
+                    >
+                      <svg
+                        aria-hidden="true"
+                        focusable="false"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                        style={{ display: 'block' }}
+                      >
+                        <path
+                          d="M8 3H17L21 7V21H8V3Z"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <path
+                          d="M3 3H8V21H3V3Z"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                    {isCopyTooltipVisible ? (
+                      <div
+                        role="status"
+                        style={{
+                          position: 'absolute',
+                          bottom: '100%',
+                          right: 0,
+                          transform: 'translateY(-6px)',
+                          background: '#0b1220',
+                          color: '#e2e8f0',
+                          border: '1px solid #1e293b',
+                          borderRadius: 6,
+                          padding: '6px 8px',
+                          fontSize: 11,
+                          whiteSpace: 'nowrap',
+                          boxShadow: '0 4px 12px rgba(15, 23, 42, 0.45)'
+                        }}
+                      >
+                        Challenge ID copied to clipboard
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <div style={{
+            background: '#0b1220',
+            border: '1px solid #1e293b',
+            borderRadius: 8,
+            padding: 12,
+            overflow: 'auto',
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+            fontSize: 12,
+            flex: 1,
+            minHeight: 0
+          }}>
+            {challengeSnapshots.length === 0 ? (
+              <div style={{ color: '#94a3b8' }}>Waiting for challenge refreshes…</div>
+            ) : (
+              challengeSnapshots.map(snapshot => (
+                <div key={snapshot.id} style={{ marginBottom: 16 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8' }}>
+                    <span>Refresh #{snapshot.id}{snapshot.stage ? ` • ${snapshot.stage}` : ''}</span>
+                    <span>{new Date(snapshot.timestamp).toLocaleTimeString()}</span>
+                  </div>
+                  <pre
+                    style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}
+                    dangerouslySetInnerHTML={{ __html: highlightJson(snapshot.challenge) }}
+                  />
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+      {openStep ? (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.7)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 24,
+            zIndex: 20
+          }}
+        >
+          <div
+            style={{
+              width: 'min(600px, 100%)',
+              maxHeight: '80vh',
+              overflowY: 'auto',
+              background: '#0f172a',
+              border: '1px solid #1f2937',
+              borderRadius: 12,
+              padding: 20,
+              color: '#e2e8f0',
+              boxShadow: '0 20px 45px rgba(15, 23, 42, 0.6)'
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+              <div>
+                <h3 style={{ margin: 0 }}>Failed requests</h3>
+                <p style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 14 }}>{formatStepTitle(openStep)}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setOpenStep(null);
+                  setSelectedFailure(null);
+                }}
+                style={{
+                  border: '1px solid #1f2937',
+                  background: '#1e293b',
+                  color: '#f8fafc',
+                  padding: '4px 8px',
+                  borderRadius: 6,
+                  cursor: 'pointer'
+                }}
+              >
+                Close
+              </button>
+            </div>
+            {failureRequests.length === 0 ? (
+              <p style={{ marginTop: 16, color: '#94a3b8' }}>No failed request details were captured for this step.</p>
+            ) : (
+              <ul style={{ listStyle: 'none', padding: 0, margin: '16px 0 0', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {failureRequests.map((failure) => {
+                  const summaryParts = [failure.method, failure.endpoint].filter(Boolean).join(' ');
+                  const statusLabel = failure.status !== undefined ? `Status ${failure.status}` : 'Status unknown';
+                  return (
+                    <li
+                      key={failure.id}
+                      style={{
+                        border: '1px solid #1f2937',
+                        borderRadius: 8,
+                        padding: 12,
+                        background: '#111c30',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'flex-start',
+                        gap: 12
+                      }}
+                    >
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <span style={{ fontWeight: 600 }}>{summaryParts || failure.message || 'Request'}</span>
+                        <span style={{ fontSize: 12, color: '#94a3b8' }}>
+                          {statusLabel}
+                          {failure.message ? ` • ${failure.message}` : ''}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedFailure({ step: openStep, item: failure })}
+                        style={{
+                          border: '1px solid #1f2937',
+                          background: '#1e293b',
+                          color: '#f8fafc',
+                          padding: '4px 10px',
+                          borderRadius: 6,
+                          cursor: 'pointer',
+                          whiteSpace: 'nowrap'
+                        }}
+                      >
+                        View details
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+      ) : null}
+      {selectedFailure ? (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.75)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 24,
+            zIndex: 30
+          }}
+        >
+          <div
+            style={{
+              width: 'min(640px, 100%)',
+              maxHeight: '85vh',
+              overflowY: 'auto',
+              background: '#0f172a',
+              border: '1px solid #1f2937',
+              borderRadius: 12,
+              padding: 24,
+              color: '#e2e8f0',
+              boxShadow: '0 24px 60px rgba(15, 23, 42, 0.65)'
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+              <div>
+                <h3 style={{ margin: 0 }}>Request details</h3>
+                <p style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 14 }}>{formatStepTitle(selectedFailure.step)}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedFailure(null)}
+                style={{
+                  border: '1px solid #1f2937',
+                  background: '#1e293b',
+                  color: '#f8fafc',
+                  padding: '4px 8px',
+                  borderRadius: 6,
+                  cursor: 'pointer'
+                }}
+              >
+                Close
+              </button>
+            </div>
+            <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
+              <div>
+                <span style={{ fontSize: 12, color: '#94a3b8' }}>Endpoint</span>
+                <div style={{ fontWeight: 600 }}>{selectedFailure.item.endpoint || 'Unknown'}</div>
+              </div>
+              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                <div>
+                  <span style={{ fontSize: 12, color: '#94a3b8' }}>Method</span>
+                  <div style={{ fontWeight: 600 }}>{selectedFailure.item.method || 'Unknown'}</div>
+                </div>
+                <div>
+                  <span style={{ fontSize: 12, color: '#94a3b8' }}>Status code</span>
+                  <div style={{ fontWeight: 600 }}>{selectedFailure.item.status ?? 'Unknown'}</div>
+                </div>
+              </div>
+              {selectedFailure.item.message ? (
+                <div>
+                  <span style={{ fontSize: 12, color: '#94a3b8' }}>Message</span>
+                  <div>{selectedFailure.item.message}</div>
+                </div>
+              ) : null}
+              <div>
+                <span style={{ fontSize: 12, color: '#94a3b8' }}>Request body</span>
+                <pre
+                  style={{
+                    background: '#111c30',
+                    border: '1px solid #1f2937',
+                    borderRadius: 8,
+                    padding: 12,
+                    overflowX: 'auto'
+                  }}
+                >
+                  {stringifyValue(selectedFailure.item.requestBody)}
+                </pre>
+              </div>
+              <div>
+                <span style={{ fontSize: 12, color: '#94a3b8' }}>Response body</span>
+                <pre
+                  style={{
+                    background: '#111c30',
+                    border: '1px solid #1f2937',
+                    borderRadius: 8,
+                    padding: 12,
+                    overflowX: 'auto'
+                  }}
+                >
+                  {stringifyValue(selectedFailure.item.responseBody)}
+                </pre>
+              </div>
+              {selectedFailure.item.responseHeaders ? (
+                <div>
+                  <span style={{ fontSize: 12, color: '#94a3b8' }}>Response headers</span>
+                  <pre
+                    style={{
+                      background: '#111c30',
+                      border: '1px solid #1f2937',
+                      borderRadius: 8,
+                      padding: 12,
+                      overflowX: 'auto'
+                    }}
+                  >
+                    {stringifyValue(selectedFailure.item.responseHeaders)}
+                  </pre>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}

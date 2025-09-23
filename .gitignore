@@ -1,0 +1,11 @@
+
+node_modules
+dist
+build
+server/dist
+client/dist
+server/data/*.json
+server/secrets/*.json
+.env
+.env.*
+.DS_Store
