@@ -233,10 +233,9 @@ export const TC = {
   },
   // NOTE: The exact endpoint to update review item scores may vary.
   // If your environment exposes a dedicated endpoint, adjust here.
-  async updateReviewItem(token: string, payload: any) {
+  async updateReviewItem(token: string, reviewItemId: string, payload: any) {
     const ax = axiosWithAuth(token);
-    // Placeholder endpoint; adjust to your review service API if different:
-    const { data } = await ax.post(`https://api.topcoder-dev.com/v6/review-items`, payload);
+    const { data } = await ax.patch(`https://api.topcoder-dev.com/v6/reviews/items/${reviewItemId}`, payload);
     return data;
   }
 };

@@ -784,6 +784,13 @@ async function stepCreateAppeals(
   const { writeLastRun, readLastRun } = await import('../utils/lastRun.js');
   log.info('Creating random appeals for review items...');
   const appeals: any[] = [];
+  const questionsById = new Map<string, any>(
+    Array.isArray(reviewInfo?.questions)
+      ? reviewInfo.questions
+          .filter((q: any) => q && (q.id !== undefined))
+          .map((q: any) => [String(q.id), q] as [string, any])
+      : []
+  );
   const lr = readLastRun();
   const ap: string[] = lr.appeals || [];
   const challengeId = lr.challengeId;
@@ -896,7 +903,8 @@ async function stepCreateAppeals(
           const a = await TC.createAppeal(token, payload);
           cancel.check();
           log.info('RES createAppeal', a);
-          appeals.push({ appeal: a, review: r, reviewItem: item });
+          const question = questionsById.get(String(item?.scorecardQuestionId ?? ''));
+          appeals.push({ appeal: a, review: r, reviewItem: item, question });
           appealedCommentIds.add(commentId);
           ap.push(a.id);
           writeLastRun({ appeals: ap, appealedCommentIds: Array.from(appealedCommentIds) });
@@ -999,6 +1007,12 @@ async function stepAppealResponses(
     return undefined;
   };
 
+  const toNumber = (value: unknown) => {
+    if (value === null || value === undefined) return undefined;
+    const num = Number(value);
+    return Number.isFinite(num) ? num : undefined;
+  };
+
   for (const entry of appeals) {
     cancel.check();
     const success = Math.random() < 0.5;
@@ -1022,26 +1036,75 @@ async function stepAppealResponses(
       log.info('RES respondToAppeal', { ok: true, appealId: entry.appeal.id });
       log.info('Appeal response posted', { appealId: entry.appeal.id, success });
 
+      const reviewItem = entry.reviewItem;
+      const reviewItemId = reviewItem?.id !== undefined ? String(reviewItem.id) : undefined;
+      const reviewId = entry.review?.id !== undefined ? String(entry.review.id) : undefined;
+      const scorecardQuestionId = reviewItem?.scorecardQuestionId !== undefined ? String(reviewItem.scorecardQuestionId) : undefined;
+      const initialAnswerRaw = reviewItem?.initialAnswer ?? reviewItem?.finalAnswer;
+
+      if (!reviewItemId || !reviewId || !scorecardQuestionId || initialAnswerRaw === undefined) {
+        log.warn('Missing review item details; skipping review item update after appeal response', {
+          appealId: entry.appeal?.id,
+          reviewItemId,
+          reviewId,
+          scorecardQuestionId,
+          hasInitialAnswer: initialAnswerRaw !== undefined
+        });
+        continue;
+      }
+
+      const initialAnswer = String(initialAnswerRaw);
+      const existingFinalAnswer = reviewItem?.finalAnswer !== undefined ? String(reviewItem.finalAnswer) : undefined;
+      const question = entry.question;
+
+      let finalAnswer = existingFinalAnswer ?? initialAnswer;
       if (success) {
-        // Attempt to update the related review item score upward by 1 if numeric.
-        const qId = entry.reviewItem.scorecardQuestionId;
-        const initial = entry.reviewItem.initialAnswer;
-        const num = Number(initial);
-        const final = Number.isFinite(num) ? String(num + 1) : initial; // minimal nudge
-        try {
-          cancel.check();
-          await TC.updateReviewItem(token, {
-            scorecardQuestionId: qId,
-            initialAnswer: initial,
-            finalAnswer: final,
-            reviewId: entry.review.id
-          });
-          cancel.check();
-          log.info('Review item score updated', { reviewId: entry.review.id, qId, final });
-        } catch (e:any) {
-          log.warn('Failed to update review item score (adjust endpoint if needed)', { error: e?.message || String(e) });
-          ctx?.recordFailure(e, { requestBody: { scorecardQuestionId: qId, initialAnswer: initial, finalAnswer: final, reviewId: entry.review.id } });
+        const questionType = typeof question?.type === 'string' ? question.type.toUpperCase() : undefined;
+        if (questionType === 'YES_NO') {
+          const normalizedInitial = initialAnswer.trim().toUpperCase();
+          finalAnswer = normalizedInitial === 'NO' ? 'YES' : (normalizedInitial || 'YES');
+        } else {
+          const initialNumeric = toNumber(initialAnswer);
+          const existingFinalNumeric = existingFinalAnswer !== undefined ? toNumber(existingFinalAnswer) : undefined;
+          const scaleMaxNumeric = toNumber(question?.scaleMax ?? reviewItem?.scaleMax);
+          if (initialNumeric !== undefined) {
+            let target = existingFinalNumeric !== undefined && existingFinalNumeric > initialNumeric
+              ? existingFinalNumeric
+              : initialNumeric + 1;
+            if (scaleMaxNumeric !== undefined) {
+              target = Math.min(target, scaleMaxNumeric);
+            }
+            if (scaleMaxNumeric !== undefined && target > scaleMaxNumeric) {
+              target = scaleMaxNumeric;
+            }
+            if (target < initialNumeric) {
+              target = scaleMaxNumeric !== undefined ? Math.min(scaleMaxNumeric, initialNumeric + 1) : initialNumeric;
+            }
+            finalAnswer = String(target);
+          } else {
+            finalAnswer = initialAnswer;
+          }
         }
+      } else if (!existingFinalAnswer) {
+        finalAnswer = initialAnswer;
+      }
+
+      const reviewItemPayload = {
+        scorecardQuestionId,
+        initialAnswer,
+        finalAnswer,
+        reviewId
+      };
+
+      try {
+        cancel.check();
+        log.info('REQ patchReviewItem', { reviewItemId, payload: reviewItemPayload });
+        await TC.updateReviewItem(token, reviewItemId, reviewItemPayload);
+        cancel.check();
+        log.info('Review item updated', { reviewItemId, reviewId, finalAnswer });
+      } catch (e: any) {
+        log.warn('Failed to update review item', { error: e?.message || String(e) });
+        ctx?.recordFailure(e, { requestBody: { reviewItemId, ...reviewItemPayload } });
       }
     } catch (e:any) {
       log.warn('Appeal response failed', { error: e?.message || String(e) });
