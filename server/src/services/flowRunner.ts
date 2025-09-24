@@ -787,6 +787,10 @@ async function stepCreateAppeals(
   const lr = readLastRun();
   const ap: string[] = lr.appeals || [];
   const challengeId = lr.challengeId;
+  const appealedCommentIdsFromLastRun = Array.isArray(lr.appealedCommentIds)
+    ? lr.appealedCommentIds.filter((id: unknown): id is string => typeof id === 'string')
+    : [];
+  const appealedCommentIds = new Set<string>(appealedCommentIdsFromLastRun);
 
   const normalizeResources = (list: any[]) => (Array.isArray(list) ? list : []).map((res: any) => ({
     id: res?.id !== undefined ? String(res.id) : undefined,
@@ -859,41 +863,49 @@ async function stepCreateAppeals(
   if (Object.keys(patch).length) {
     writeLastRun(patch);
   }
-  // For demonstration we create up to 3 appeals per review item comment id, but we need comment IDs from created reviews
+  // Attempt at most one appeal per review item comment id, but we need comment IDs from created reviews
   for (const r of reviewInfo.reviews) {
     cancel.check();
     for (const item of (r.reviewItems || [])) {
       cancel.check();
       for (const c of (item.reviewItemComments || [])) {
         cancel.check();
-        const numAppeals = randInt(0, 3);
-        for (let i=0;i<numAppeals;i++) {
-          // Pick a random submitter as the appellant
-          const submitterHandle = cfg.submitters[randInt(0, Math.max(0, cfg.submitters.length-1))] || '';
-          if (!submitterHandle) continue;
-          const resourceId = getResourceIdForHandle(submitterHandle);
-          if (!resourceId) {
-            log.warn('No challenge resource found for submitter; skipping appeal creation', { submitterHandle });
-            continue;
-          }
-          const payload = {
-            resourceId,
-            reviewItemCommentId: c.id,
-            content: `Appeal ${i+1}: We believe this should be adjusted.`
-          };
-          try {
-            log.info('REQ createAppeal', payload);
-            const a = await TC.createAppeal(token, payload);
-            cancel.check();
-            log.info('RES createAppeal', a);
-            appeals.push({ appeal: a, review: r, reviewItem: item });
-            ap.push(a.id);
-            writeLastRun({ appeals: ap });
-            log.info('Appeal created', { appealId: a.id, by: submitterHandle });
-          } catch (e:any) {
-            log.warn('Create appeal failed', { error: e?.message || String(e) });
-            ctx?.recordFailure(e, { requestBody: payload });
-          }
+        const commentId = c?.id !== undefined ? String(c.id) : undefined;
+        if (!commentId) continue;
+        if (appealedCommentIds.has(commentId)) {
+          log.info('Skipping appeal creation for already appealed comment', { reviewItemCommentId: commentId });
+          continue;
+        }
+        const shouldCreateAppeal = randInt(0, 1) === 1;
+        if (!shouldCreateAppeal) continue;
+        // Pick a random submitter as the appellant
+        const submitterHandle = cfg.submitters[randInt(0, Math.max(0, cfg.submitters.length-1))] || '';
+        if (!submitterHandle) continue;
+        const resourceId = getResourceIdForHandle(submitterHandle);
+        if (!resourceId) {
+          log.warn('No challenge resource found for submitter; skipping appeal creation', { submitterHandle });
+          continue;
+        }
+        const payload = {
+          resourceId,
+          reviewItemCommentId: commentId,
+          content: 'Appeal: We believe this should be adjusted.'
+        };
+        try {
+          log.info('REQ createAppeal', payload);
+          const a = await TC.createAppeal(token, payload);
+          cancel.check();
+          log.info('RES createAppeal', a);
+          appeals.push({ appeal: a, review: r, reviewItem: item });
+          appealedCommentIds.add(commentId);
+          ap.push(a.id);
+          writeLastRun({ appeals: ap, appealedCommentIds: Array.from(appealedCommentIds) });
+          log.info('Appeal created', { appealId: a.id, by: submitterHandle });
+        } catch (e:any) {
+          log.warn('Create appeal failed', { error: e?.message || String(e) });
+          appealedCommentIds.add(commentId);
+          writeLastRun({ appealedCommentIds: Array.from(appealedCommentIds) });
+          ctx?.recordFailure(e, { requestBody: payload });
         }
       }
     }
