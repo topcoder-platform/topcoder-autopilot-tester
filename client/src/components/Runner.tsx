@@ -1,14 +1,11 @@
 
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import type { FlowVariant } from '../types'
+import { FLOW_DEFINITIONS } from '../flows'
 
 type LogEntry = { level: string; message: string; data?: any; progress?: number };
 type ChallengeSnapshot = { id: number; stage?: string; timestamp: string; challenge: any };
-type StepName =
-  | 'token' | 'createChallenge' | 'updateDraft' | 'activate'
-  | 'awaitRegSubOpen' | 'assignResources' | 'createSubmissions'
-  | 'awaitReviewOpen' | 'createReviews' | 'awaitAppealsOpen'
-  | 'createAppeals' | 'awaitAppealsResponseOpen' | 'appealResponses'
-  | 'awaitAllClosed' | 'awaitCompletion';
+type StepName = string;
 type StepStatus = 'pending' | 'in-progress' | 'success' | 'failure';
 type StepRequestLog = {
   id: string;
@@ -32,38 +29,6 @@ type StepEvent = {
   timestamp: string;
 };
 type StepRequestMap = Partial<Record<StepName, StepRequestLog[]>>;
-
-const STEPS: StepName[] = [
-  'token','createChallenge','updateDraft','activate',
-  'awaitRegSubOpen','assignResources','createSubmissions',
-  'awaitReviewOpen','createReviews','awaitAppealsOpen',
-  'createAppeals','awaitAppealsResponseOpen','appealResponses',
-  'awaitAllClosed','awaitCompletion'
-];
-
-const STEP_LABELS: Record<StepName, string> = {
-  token: 'Token',
-  createChallenge: 'Create Challenge',
-  updateDraft: 'Update Draft',
-  activate: 'Activate',
-  awaitRegSubOpen: 'Await Reg/Sub Open',
-  assignResources: 'Assign Resources',
-  createSubmissions: 'Create Submissions',
-  awaitReviewOpen: 'Await Review Open',
-  createReviews: 'Create Reviews',
-  awaitAppealsOpen: 'Await Appeals Open',
-  createAppeals: 'Create Appeals',
-  awaitAppealsResponseOpen: 'Await Appeals Response',
-  appealResponses: 'Appeal Responses',
-  awaitAllClosed: 'Await All Closed',
-  awaitCompletion: 'Await Completion'
-};
-
-const formatStepTitle = (step: StepName): string => {
-  const idx = STEPS.indexOf(step);
-  const prefix = idx >= 0 ? `${String(idx + 1).padStart(2, '0')}. ` : '';
-  return `${prefix}${STEP_LABELS[step]}`;
-};
 
 const highlightJson = (value: unknown) => {
   if (value === undefined) return '';
@@ -93,9 +58,9 @@ const highlightJson = (value: unknown) => {
   );
 };
 
-const buildInitialStepStatuses = (): Record<StepName, StepStatus> => {
+const buildInitialStepStatuses = (steps: StepName[]): Record<StepName, StepStatus> => {
   const initial = {} as Record<StepName, StepStatus>;
-  for (const step of STEPS) initial[step] = 'pending';
+  for (const step of steps) initial[step] = 'pending';
   return initial;
 };
 
@@ -247,7 +212,17 @@ function CopyButton({ value, label }: { value?: string | null; label: string }) 
   );
 }
 
-export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep?: string }) {
+export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode: 'full'|'toStep'; toStep?: string }) {
+  const definition = FLOW_DEFINITIONS[flow];
+  const stepIds = useMemo<StepName[]>(() => definition.steps.map(step => step.id), [definition]);
+  const stepLabelLookup = useMemo(() => {
+    const map = new Map<StepName, { label: string; index: number }>();
+    definition.steps.forEach((step, index) => {
+      map.set(step.id, { label: step.label, index });
+    });
+    return map;
+  }, [definition]);
+
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -256,7 +231,7 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
   const [refreshCount, setRefreshCount] = useState(0);
   const [lastRefreshTimestamp, setLastRefreshTimestamp] = useState<string | null>(null);
   const [runToken, setRunToken] = useState(0);
-  const [stepStatuses, setStepStatuses] = useState<Record<StepName, StepStatus>>(buildInitialStepStatuses);
+  const [stepStatuses, setStepStatuses] = useState<Record<StepName, StepStatus>>(() => buildInitialStepStatuses(stepIds));
   const [stepFailures, setStepFailures] = useState<StepRequestMap>({});
   const [stepRequests, setStepRequests] = useState<StepRequestMap>({});
   const [openStep, setOpenStep] = useState<StepName | null>(null);
@@ -268,8 +243,16 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
   const [isCopyTooltipVisible, setIsCopyTooltipVisible] = useState(false);
 
   useEffect(() => {
+    setStepStatuses(buildInitialStepStatuses(stepIds));
+    setStepFailures({});
+    setStepRequests({});
+    setOpenStep(null);
+    setSelectedRequest(null);
+  }, [stepIds]);
+
+  useEffect(() => {
     if (runToken === 0) return;
-    const params = new URLSearchParams({ mode });
+    const params = new URLSearchParams({ mode, flow });
     if (toStep) params.set('toStep', toStep);
     const es = new EventSource(`/api/run/stream?${params.toString()}`);
     sourceRef.current = es;
@@ -359,7 +342,7 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
       es.close();
       if (sourceRef.current === es) sourceRef.current = null;
     };
-  }, [runToken, mode, toStep]);
+  }, [runToken, mode, toStep, flow]);
 
   useEffect(() => {
     return () => {
@@ -383,7 +366,7 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
     setLastRefreshTimestamp(null);
     snapshotCounterRef.current = 0;
     setProgress(0);
-    setStepStatuses(buildInitialStepStatuses());
+    setStepStatuses(buildInitialStepStatuses(stepIds));
     setStepFailures({});
     setStepRequests({});
     setOpenStep(null);
@@ -404,6 +387,13 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
     : '';
   const selectedResponseHeadersCopyValue = stringifyValueForCopy(selectedRequestItem?.responseHeaders);
 
+  const formatStepTitle = (step: StepName): string => {
+    const entry = stepLabelLookup.get(step);
+    if (!entry) return step;
+    const prefix = `${String(entry.index + 1).padStart(2, '0')}. `;
+    return `${prefix}${entry.label}`;
+  };
+
   return (
     <>
       <div className="row" style={{ alignItems: 'stretch', flexWrap: 'wrap' }}>
@@ -417,8 +407,9 @@ export default function Runner({ mode, toStep }: { mode: 'full'|'toStep', toStep
           <div style={{ marginBottom: 12 }}>
             <h4 style={{ margin: '0 0 8px' }}>Step status</h4>
             <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
-              {STEPS.map(step => {
-                const status = stepStatuses[step];
+              {definition.steps.map(stepInfo => {
+                const step = stepInfo.id;
+                const status = stepStatuses[step] ?? 'pending';
                 const ui = STATUS_UI[status];
                 const requestsForStep = stepRequests[step] ?? [];
                 const allowOpen = status !== 'pending' || requestsForStep.length > 0;

@@ -1,10 +1,11 @@
 
 import { Router } from 'express';
-import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { RunnerLogger } from '../utils/logger.js';
-import { runFlow, type FlowConfig, type StepName } from '../services/flowRunner.js';
+import { runFlow, type StepName as FullStepName } from '../services/flowRunner.js';
+import { runFirst2FinishFlow, type StepName as First2FinishStepName } from '../services/first2finishRunner.js';
+import { readAppConfigFile } from '../types/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,8 +20,11 @@ type ActiveRun = {
 let activeRun: ActiveRun | null = null;
 
 router.get('/stream', async (req, res) => {
-  const mode = (req.query.mode || 'full') as 'full' | 'toStep';
-  const toStep = req.query.toStep as StepName | undefined;
+  const modeParam = typeof req.query.mode === 'string' ? req.query.mode : 'full';
+  const mode = modeParam === 'toStep' ? 'toStep' : 'full';
+  const toStepRaw = typeof req.query.toStep === 'string' ? req.query.toStep : undefined;
+  const flowParam = typeof req.query.flow === 'string' ? req.query.flow.toLowerCase() : 'full';
+  const flowVariant = flowParam === 'first2finish' ? 'first2finish' : 'full';
 
   // Cancel any previously running flow before starting a new one.
   if (activeRun) {
@@ -52,14 +56,7 @@ router.get('/stream', async (req, res) => {
   log.on('log', onLog);
   log.on('step', onStep);
 
-  let cfg: FlowConfig;
-  try {
-    cfg = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
-  } catch (e) {
-    send({ level: 'error', message: 'Failed to read config' });
-    res.end();
-    return;
-  }
+  const appConfig = readAppConfigFile(dataPath);
 
   const onClose = () => {
     controller.abort();
@@ -67,9 +64,25 @@ router.get('/stream', async (req, res) => {
   req.on('close', onClose);
 
   try {
-    send({ level: 'info', message: 'Run started' });
-    await runFlow(cfg, mode, toStep, log, controller.signal);
-    send({ level: 'info', message: 'Run finished', progress: 100 });
+    send({ level: 'info', message: 'Run started', data: { flow: flowVariant } });
+    if (flowVariant === 'first2finish') {
+      await runFirst2FinishFlow(
+        appConfig.first2finish,
+        mode,
+        toStepRaw as First2FinishStepName | undefined,
+        log,
+        controller.signal
+      );
+    } else {
+      await runFlow(
+        appConfig.fullChallenge,
+        mode,
+        toStepRaw as FullStepName | undefined,
+        log,
+        controller.signal
+      );
+    }
+    send({ level: 'info', message: 'Run finished', progress: 100, data: { flow: flowVariant } });
   } catch (e: any) {
     const msg = String(e?.message || e);
     if (msg === '__STOP_EARLY__') {

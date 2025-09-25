@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid';
 import { RunnerLogger, type StepRequestLog, type StepStatus } from '../utils/logger.js';
 import { setActiveStepRequestRecorder, type StepRequestLogInput } from '../utils/stepRequestRecorder.js';
 import { getToken, TC } from './topcoder.js';
+import type { FlowConfig } from '../types/config.js';
 
 type CancellationHelpers = {
   check: () => void;
@@ -59,20 +60,6 @@ function createCancellationHelpers(signal: AbortSignal | undefined, log: RunnerL
 
   return { check, wait };
 }
-
-export type FlowConfig = {
-  challengeNamePrefix: string;
-  projectId: number;
-  challengeTypeId: string;
-  challengeTrackId: string;
-  timelineTemplateId: string;
-  copilotHandle: string;
-  reviewers: string[];       // handles
-  submitters: string[];      // handles
-  submissionsPerSubmitter: number;
-  scorecardId: string;
-  prizes: [number, number, number];
-};
 
 export type RunMode = 'full' | 'toStep';
 export type StepName =

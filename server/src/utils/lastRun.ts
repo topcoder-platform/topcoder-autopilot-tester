@@ -21,6 +21,7 @@ export type LastRun = {
   submissions?: { [submitterHandle: string]: string[] }; // list of submission IDs by handle
   reviews?: { [key: string]: string }; // `${reviewerHandle}:${submitterHandle}:${submissionId}` -> reviewId
   appeals?: string[]; // appeal ids
+  appealedCommentIds?: string[];
   reviewerResources?: { [handle: string]: string }; // reviewer handle -> resource id
   challengeResources?: ChallengeResource[]; // resources fetched from challenge API
   resourceRoleIds?: { [roleName: string]: string }; // cached resource role IDs by name

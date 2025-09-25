@@ -6,6 +6,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Topcoder Autopilot Tester</title>
     <style>
+      :root {
+        --primary-color: #2563eb;
+        --primary-color-strong: #1d4ed8;
+      }
       body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0; background: #0b1220; color: #eef2ff; }
       header { padding: 16px 24px; background: #0f172a; border-bottom: 1px solid #1e293b; }
       .container { padding: 24px; max-width: 1100px; margin: 0 auto; }
@@ -20,7 +24,8 @@
         padding-right: 24px;
         box-sizing: border-box;
       }
-      button { background: #2563eb; color: white; border: 0; padding: 10px 14px; border-radius: 8px; cursor: pointer; }
+      button { background: var(--primary-color); color: white; border: 0; padding: 10px 14px; border-radius: 8px; cursor: pointer; transition: background .2s ease; }
+      button:not(.secondary):hover { background: var(--primary-color-strong); }
       button.secondary { background: #334155; }
       table { width: 100%; border-collapse: collapse; }
       th, td { border-bottom: 1px solid #1e293b; text-align: left; padding: 8px; font-size: 14px;}

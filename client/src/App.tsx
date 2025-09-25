@@ -1,30 +1,141 @@
-
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
 import ConfigTable from './components/ConfigTable'
 import ConfigForm from './components/ConfigForm'
 import Runner from './components/Runner'
+import type { AppConfig, FlowVariant } from './types'
+import { FLOW_DEFINITIONS, ORDERED_FLOW_KEYS } from './flows'
+
+type ViewState = 'home' | 'edit' | 'runFull' | 'runToStep'
+
+const initialViewState = ORDERED_FLOW_KEYS.reduce<Record<FlowVariant, ViewState>>((acc, key) => {
+  acc[key] = 'home'
+  return acc
+}, {} as Record<FlowVariant, ViewState>)
+
+const initialToStepState = ORDERED_FLOW_KEYS.reduce<Record<FlowVariant, string>>((acc, key) => {
+  acc[key] = FLOW_DEFINITIONS[key].defaultToStep
+  return acc
+}, {} as Record<FlowVariant, string>)
+
+function getFlowConfig(config: AppConfig, flow: FlowVariant) {
+  return flow === 'full' ? config.fullChallenge : config.first2finish
+}
 
 export default function App() {
-  const [config, setConfig] = useState<any>(null);
-  const [view, setView] = useState<'home'|'edit'|'runFull'|'runToStep'>('home');
-  const [toStep, setToStep] = useState<string>('activate');
+  const [config, setConfig] = useState<AppConfig | null>(null)
+  const [views, setViews] = useState<Record<FlowVariant, ViewState>>(initialViewState)
+  const [toStepState, setToStepState] = useState<Record<FlowVariant, string>>(initialToStepState)
+  const [activeFlow, setActiveFlow] = useState<FlowVariant>('full')
 
   const loadConfig = async () => {
-    const { data } = await axios.get('/api/config');
-    setConfig(data);
-  };
-  useEffect(()=>{ loadConfig() }, []);
+    const { data } = await axios.get<AppConfig>('/api/config')
+    setConfig(data)
+  }
 
-  if (!config) return <div className="container"><div className="card">Loading...</div></div>;
+  useEffect(() => {
+    loadConfig()
+  }, [])
 
-  const showRunner = view === 'runFull' || view === 'runToStep';
-  const runSteps = ['token','createChallenge','updateDraft','activate','awaitRegSubOpen','assignResources','createSubmissions','awaitReviewOpen','createReviews','awaitAppealsOpen','createAppeals','awaitAppealsResponseOpen','appealResponses','awaitAllClosed','awaitCompletion'];
+  const currentView = views[activeFlow]
+  const flowDefinition = FLOW_DEFINITIONS[activeFlow]
+  const runSteps = flowDefinition.steps
+  const currentToStep = toStepState[activeFlow]
+
+  const flowConfig = useMemo(() => (config ? getFlowConfig(config, activeFlow) : null), [config, activeFlow])
+  const showRunner = currentView === 'runFull' || currentView === 'runToStep'
+
+  useEffect(() => {
+    const root = document.documentElement
+    if (!root) return
+    const isFirst2FinishActive = activeFlow === 'first2finish'
+    const primary = isFirst2FinishActive ? '#047857' : '#2563eb'
+    const primaryStrong = isFirst2FinishActive ? '#065f46' : '#1d4ed8'
+    root.style.setProperty('--primary-color', primary)
+    root.style.setProperty('--primary-color-strong', primaryStrong)
+    return () => {
+      root.style.setProperty('--primary-color', '#2563eb')
+      root.style.setProperty('--primary-color-strong', '#1d4ed8')
+    }
+  }, [activeFlow])
+
+  if (!config || !flowConfig) {
+    return (
+      <div className="container">
+        <div className="card">Loading...</div>
+      </div>
+    )
+  }
+
+  const updateView = (flow: FlowVariant, next: ViewState) => {
+    setViews(prev => ({ ...prev, [flow]: next }))
+  }
+
+  const handleRunFull = () => {
+    updateView(activeFlow, 'runFull')
+  }
+
+  const handleRunToStep = () => {
+    const hasStep = runSteps.some(step => step.id === toStepState[activeFlow])
+    const nextStep = hasStep ? toStepState[activeFlow] : flowDefinition.defaultToStep
+    setToStepState(prev => ({ ...prev, [activeFlow]: nextStep }))
+    updateView(activeFlow, 'runToStep')
+  }
+
+  const handleConfigSaved = () => {
+    loadConfig()
+    updateView(activeFlow, 'home')
+  }
 
   return (
     <>
       <div className="full-bleed" style={{ marginBottom: 16 }}>
-        <ConfigTable config={config} />
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {ORDERED_FLOW_KEYS.map(flowKey => {
+            const definition = FLOW_DEFINITIONS[flowKey]
+            const isActive = flowKey === activeFlow
+            const isFirst2Finish = flowKey === 'first2finish'
+            const palette = isFirst2Finish
+              ? {
+                  activeBackground: '#047857',
+                  inactiveBackground: '#064e3b',
+                  activeBorder: '#065f46',
+                  inactiveBorder: '#065f46',
+                  activeColor: '#f8fafc',
+                  inactiveColor: '#bbf7d0'
+                }
+              : {
+                  activeBackground: '#1d4ed8',
+                  inactiveBackground: '#1e293b',
+                  activeBorder: '#1f2937',
+                  inactiveBorder: '#1f2937',
+                  activeColor: '#f8fafc',
+                  inactiveColor: '#cbd5f5'
+                }
+            return (
+              <button
+                type="button"
+                key={flowKey}
+                onClick={() => setActiveFlow(flowKey)}
+                style={{
+                  padding: '8px 16px',
+                  borderRadius: 999,
+                  border: `1px solid ${isActive ? palette.activeBorder : palette.inactiveBorder}`,
+                  background: isActive ? palette.activeBackground : palette.inactiveBackground,
+                  color: isActive ? palette.activeColor : palette.inactiveColor,
+                  fontWeight: isActive ? 600 : 500,
+                  cursor: 'pointer'
+                }}
+              >
+                {definition.tabLabel}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="full-bleed" style={{ marginBottom: 16 }}>
+        <ConfigTable flow={activeFlow} config={flowConfig} />
       </div>
 
       <div className="full-bleed" style={{ marginBottom: 16 }}>
@@ -33,32 +144,38 @@ export default function App() {
             <div className="card">
               <h3>Actions</h3>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button onClick={() => setView('runFull')}>Run the full flow</button>
-                <button onClick={() => setView('runToStep')}>Run to a specific step</button>
-                <button className="secondary" onClick={() => setView('edit')}>Edit configuration</button>
+                <button type="button" onClick={handleRunFull}>Run the full flow</button>
+                <button type="button" onClick={handleRunToStep}>Run to a specific step</button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => updateView(activeFlow, 'edit')}
+                >
+                  Edit configuration
+                </button>
               </div>
             </div>
           </div>
         </div>
       </div>
 
-      {view === 'edit' && (
+      {currentView === 'edit' && (
         <div className="container" style={{ marginBottom: 16 }}>
-          <ConfigForm onSaved={() => { loadConfig(); setView('home'); }} />
+          <ConfigForm flow={activeFlow} config={config} onSaved={handleConfigSaved} />
         </div>
       )}
 
-      {view === 'runToStep' && (
+      {currentView === 'runToStep' && (
         <div className="container" style={{ marginBottom: 16 }}>
           <div className="card">
             <label>Step</label>
             <select
-              value={toStep}
-              onChange={e => setToStep(e.target.value)}
+              value={currentToStep}
+              onChange={event => setToStepState(prev => ({ ...prev, [activeFlow]: event.target.value }))}
               style={{ maxWidth: 400, marginBottom: 12 }}
             >
-              {runSteps.map(s => (
-                <option key={s} value={s}>{s}</option>
+              {runSteps.map(step => (
+                <option key={step.id} value={step.id}>{step.label}</option>
               ))}
             </select>
           </div>
@@ -67,7 +184,11 @@ export default function App() {
 
       {showRunner && (
         <div className="full-bleed" style={{ marginBottom: 16 }}>
-          <Runner mode={view === 'runFull' ? 'full' : 'toStep'} toStep={view === 'runToStep' ? toStep : undefined} />
+          <Runner
+            flow={activeFlow}
+            mode={currentView === 'runFull' ? 'full' : 'toStep'}
+            toStep={currentView === 'runToStep' ? currentToStep : undefined}
+          />
         </div>
       )}
     </>
