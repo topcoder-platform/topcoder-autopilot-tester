@@ -216,6 +216,11 @@ export const TC = {
     const { data } = await ax.post(`https://api.topcoder-dev.com/v6/reviews`, payload);
     return data;
   },
+  async updateReview(token: string, reviewId: string, payload: any) {
+    const ax = axiosWithAuth(token);
+    const { data } = await ax.patch(`https://api.topcoder-dev.com/v6/reviews/${reviewId}`, payload);
+    return data;
+  },
   async listReviews(token: string, challengeId: string) {
     const ax = axiosWithAuth(token);
     const { data } = await ax.get(`https://api.topcoder-dev.com/v6/reviews`, { params: { challengeId } });

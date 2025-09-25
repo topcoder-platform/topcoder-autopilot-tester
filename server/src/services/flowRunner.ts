@@ -656,6 +656,34 @@ async function stepCreateReviews(
   const questions: any[] = [];
   for (const g of groups) for (const s of (g.sections||[])) for (const q of (s.questions||[])) questions.push(q);
 
+  log.info('REQ listReviews', { challengeId });
+  const listResponse = await TC.listReviews(token, challengeId);
+  cancel.check();
+  const responseData = Array.isArray(listResponse)
+    ? listResponse
+    : Array.isArray((listResponse as any)?.data)
+      ? (listResponse as any).data
+      : [];
+  const existingReviews = responseData;
+  const totalReviews = typeof (listResponse as any)?.meta?.totalCount === 'number'
+    ? (listResponse as any).meta.totalCount
+    : existingReviews.length;
+  const pendingReviewMap = new Map<string, any>();
+  for (const review of existingReviews) {
+    const status = typeof review?.status === 'string' ? review.status.toUpperCase() : '';
+    if (status === 'PENDING' || status === 'IN_PROGRESS') {
+      const resourceId = review?.resourceId !== undefined ? String(review.resourceId) : undefined;
+      const submissionId = review?.submissionId !== undefined ? String(review.submissionId) : undefined;
+      if (resourceId && submissionId) {
+        const key = `${resourceId}:${submissionId}`;
+        if (!pendingReviewMap.has(key)) {
+          pendingReviewMap.set(key, review);
+        }
+      }
+    }
+  }
+  log.info('RES listReviews', { total: totalReviews, fetched: existingReviews.length, pending: pendingReviewMap.size });
+
   // Gather reviewer resource IDs by handle (reuse roles fetch)
   log.info('REQ listResourceRoles');
   log.info('REQ listResourceRoles');
@@ -688,24 +716,51 @@ async function stepCreateReviews(
   // Here we won't have them; in real run stepCreateSubmissions logs submission IDs; user can proceed in one run.
   // For demo completeness, we'll create one artificial map to proceed; adjust to your needs.
 
-const created = [] as any[];
-for (const submitterHandle of cfg.submitters) {
-  cancel.check();
-  const mem = await TC.getMemberByHandle(token, submitterHandle);
-  cancel.check();
-  const subIds = (lr.submissions && lr.submissions[submitterHandle]) || [];
-  if (!subIds.length) {
-    log.warn('No submission IDs recorded for submitter; skipping', { submitterHandle });
-    continue;
-  }
-  for (const submissionId of subIds) {
+  const updated: any[] = [];
+  for (const submitterHandle of cfg.submitters) {
     cancel.check();
-    for (const rev of reviewerResources) {
+    const mem = await TC.getMemberByHandle(token, submitterHandle);
+    cancel.check();
+    const subIds = (lr.submissions && lr.submissions[submitterHandle]) || [];
+    if (!subIds.length) {
+      log.warn('No submission IDs recorded for submitter; skipping', { submitterHandle });
+      continue;
+    }
+    for (const submissionId of subIds) {
       cancel.check();
-      const reviewItems = questions.map(q => {
-
+      for (const rev of reviewerResources) {
+        cancel.check();
+        const pendingReviewKey = `${rev.resourceId}:${submissionId}`;
+        const pendingReview = pendingReviewMap.get(pendingReviewKey);
+        if (!pendingReview) {
+          log.warn('No pending review found; skipping patch', {
+            reviewer: rev.handle,
+            resourceId: rev.resourceId,
+            submitter: submitterHandle,
+            submissionId
+          });
+          continue;
+        }
+        const reviewIdRaw = pendingReview?.id;
+        const reviewId = reviewIdRaw !== undefined ? String(reviewIdRaw) : undefined;
+        if (!reviewId) {
+          log.warn('Pending review missing id; skipping patch', {
+            reviewer: rev.handle,
+            resourceId: rev.resourceId,
+            submitter: submitterHandle,
+            submissionId
+          });
+          continue;
+        }
+        const existingItems = Array.isArray(pendingReview.reviewItems) ? pendingReview.reviewItems : [];
+        const itemsByQuestion = new Map<string, any>(existingItems
+          .filter((item: any) => item && item.scorecardQuestionId !== undefined)
+          .map((item: any) => [String(item.scorecardQuestionId), item])
+        );
+        const reviewItems = questions.map(q => {
           if (q.type === 'YES_NO') {
-            return {
+            const existingItem = itemsByQuestion.get(String(q.id));
+            const payload: any = {
               scorecardQuestionId: q.id,
               initialAnswer: randPick(['YES','NO']),
               reviewItemComments: [{
@@ -714,8 +769,11 @@ for (const submitterHandle of cfg.submitters) {
                 sortOrder: 1
               }]
             };
+            if (existingItem?.id !== undefined) payload.id = existingItem.id;
+            return payload;
           } else if (q.type === 'SCALE') {
-            return {
+            const existingItem = itemsByQuestion.get(String(q.id));
+            const payload: any = {
               scorecardQuestionId: q.id,
               initialAnswer: String(randInt(q.scaleMin || 1, q.scaleMax || 10)),
               reviewItemComments: [{
@@ -724,53 +782,55 @@ for (const submitterHandle of cfg.submitters) {
                 sortOrder: 1
               }]
             };
+            if (existingItem?.id !== undefined) payload.id = existingItem.id;
+            return payload;
           } else {
-            return {
+            const existingItem = itemsByQuestion.get(String(q.id));
+            const payload: any = {
               scorecardQuestionId: q.id,
               initialAnswer: 'YES',
               reviewItemComments: [{ content: 'Auto answer', type: 'COMMENT', sortOrder: 1 }]
             };
+            if (existingItem?.id !== undefined) payload.id = existingItem.id;
+            return payload;
           }
         });
 
+        const payload = {
+          scorecardId: pendingReview?.scorecardId || cfg.scorecardId,
+          typeId: pendingReview?.typeId || 'REVIEW',
+          metadata: pendingReview?.metadata || {},
+          status: 'COMPLETED',
+          reviewDate: dayjs().toISOString(),
+          committed: true,
+          reviewItems
+        };
 
-const payload = {
-  resourceId: rev.resourceId,
-  submissionId,
-  scorecardId: cfg.scorecardId,
-  typeId: 'REVIEW',
-  metadata: {},
-  status: 'COMPLETED',
-  reviewDate: dayjs().toISOString(),
-  committed: true,
-  reviewItems
-};
-
-try {
-  log.info('REQ createReview', payload);
-  const r = await TC.createReview(token, payload);
-  cancel.check();
-  log.info('RES createReview', r);
-  const reviewRecord = {
-    ...r,
-    resourceId: r?.resourceId ?? rev.resourceId,
-    reviewerHandle: rev.handle
-  };
-  created.push(reviewRecord);
-  const key = `${rev.handle}:${submitterHandle}:${submissionId}`;
-  const reviews = { ...(lr.reviews||{}), [key]: r.id };
-  writeLastRun({ reviews });
-  log.info('Created review', { reviewer: rev.handle, submitter: submitterHandle, submissionId, reviewId: r.id });
-} catch (e:any) {
-  log.warn('Create review failed (check submissionId/phaseId requirements in your env)', { reviewer: rev.handle, submitter: submitterHandle, submissionId, error: e?.message || String(e) });
-  ctx?.recordFailure(e, { requestBody: payload });
-}
-
+        try {
+          log.info('REQ patchReview', { reviewId, payload });
+          const r = await TC.updateReview(token, reviewId, payload);
+          cancel.check();
+          log.info('RES patchReview', { reviewId });
+          const reviewRecord = {
+            ...r,
+            resourceId: r?.resourceId ?? rev.resourceId,
+            reviewerHandle: rev.handle
+          };
+          updated.push(reviewRecord);
+          const key = `${rev.handle}:${submitterHandle}:${submissionId}`;
+          const reviews = { ...(lr.reviews||{}), [key]: r.id };
+          writeLastRun({ reviews });
+          pendingReviewMap.delete(pendingReviewKey);
+          log.info('Patched review', { reviewer: rev.handle, submitter: submitterHandle, submissionId, reviewId });
+        } catch (e:any) {
+          log.warn('Patch review failed (check submissionId/phaseId requirements in your env)', { reviewer: rev.handle, submitter: submitterHandle, submissionId, reviewId, error: e?.message || String(e) });
+          ctx?.recordFailure(e, { requestBody: payload });
+        }
       }
     }
   }
-  log.info('Reviews created', { count: created.length }, getStepProgress('createReviews'));
-  return { reviews: created, questions };
+  log.info('Reviews patched', { count: updated.length }, getStepProgress('createReviews'));
+  return { reviews: updated, questions };
 }
 
 async function stepCreateAppeals(
