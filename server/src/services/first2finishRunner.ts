@@ -275,7 +275,14 @@ async function stepCreateChallenge(
     timelineTemplateId: cfg.timelineTemplateId,
     projectId: cfg.projectId,
     status: 'NEW',
-    description: 'First2Finish end-to-end test'
+    description: 'First2Finish end-to-end test',
+    discussions: [
+      {
+        name: `${challengeName} Discussion`,
+        type: 'CHALLENGE',
+        provider: 'vanilla'
+      }
+    ]
   };
   const ch = await TC.createChallenge(token, payload);
   cancel.check();
@@ -305,7 +312,7 @@ async function stepUpdateDraft(
     prizeSets: [
       {
         type: 'PLACEMENT',
-        prizes: cfg.prizes.map((value) => ({ type: 'USD', value }))
+        prizes: [{ type: 'USD', value: cfg.prize }]
       },
       { type: 'COPILOT', prizes: [{ type: 'USD', value: 100 }] }
     ],

@@ -26,7 +26,7 @@ export type First2FinishConfig = {
   reviewer: string;
   submitters: string[];
   scorecardId: string;
-  prizes: PrizeTuple;
+  prize: number;
 };
 
 export type AppConfig = {

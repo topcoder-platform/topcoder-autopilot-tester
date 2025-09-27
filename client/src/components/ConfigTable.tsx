@@ -53,9 +53,9 @@ export default function ConfigTable({ flow, config }: Props) {
         },
         { label: 'Scorecard ID', value: (config as First2FinishConfig).scorecardId ?? '-' },
         {
-          label: 'Prizes',
-          value: Array.isArray((config as First2FinishConfig).prizes) && (config as First2FinishConfig).prizes.length
-            ? (config as First2FinishConfig).prizes.join(', ')
+          label: 'Prize',
+          value: typeof (config as First2FinishConfig).prize === 'number'
+            ? (config as First2FinishConfig).prize
             : '-'
         }
       ];

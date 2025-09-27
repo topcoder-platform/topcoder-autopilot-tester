@@ -47,7 +47,7 @@ pnpm run dev
 ## Features
 
 - **Configuration Management**
-  - Set challenge name prefix, project ID, type/track, timeline template, prizes, copilot/reviewer/submitter handles.
+  - Set challenge name prefix, project ID, type/track, timeline template, prize settings, copilot/reviewer/submitter handles.
 
 - **Flow Execution**
   - Full challenge lifecycle steps:
@@ -77,7 +77,7 @@ pnpm run dev
 ### Edit Configuration
 
 - Navigate to the UI and click _Edit configuration_.
-- Select challenge type, track, scorecard, set handles, submissions count, and prizes.
+- Select challenge type, track, scorecard, set handles, submissions count, and prize settings.
 - Save to persist into `server/data/config.json`.
 
 ### Run the Flow

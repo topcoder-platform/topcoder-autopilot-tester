@@ -335,7 +335,14 @@ async function stepCreateChallenge(
     timelineTemplateId: cfg.timelineTemplateId,
     projectId: cfg.projectId,
     status: 'NEW',
-    description: 'End-to-end test'
+    description: 'End-to-end test',
+    discussions: [
+      {
+        name: `${challengeName} Discussion`,
+        type: 'CHALLENGE',
+        provider: 'vanilla'
+      }
+    ]
   };
   const ch = await TC.createChallenge(token, payload);
   cancel.check();

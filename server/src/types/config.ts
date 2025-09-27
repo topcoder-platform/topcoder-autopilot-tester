@@ -26,7 +26,7 @@ export type First2FinishConfig = {
   reviewer: string;
   submitters: string[];
   scorecardId: string;
-  prizes: PrizeTuple;
+  prize: number;
 };
 
 export type AppConfig = {
@@ -60,7 +60,7 @@ export const DEFAULT_FIRST2FINISH_CONFIG: First2FinishConfig = {
   reviewer: 'marioskranitsas',
   submitters: ['devtest140', 'devtest141'],
   scorecardId: 'hFU73Ve2XlYCK-',
-  prizes: [500, 200, 100]
+  prize: 500
 };
 
 function ensurePrizeTuple(input: unknown, fallback: PrizeTuple): PrizeTuple {
@@ -76,6 +76,34 @@ function ensurePrizeTuple(input: unknown, fallback: PrizeTuple): PrizeTuple {
   }
   if (values.length === 1) {
     return [values[0], fallback[1], fallback[2]];
+  }
+  return fallback;
+}
+
+function ensureSinglePrize(input: unknown, fallback: number): number {
+  const coerce = (value: unknown): number | null => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
+      if (!Number.isNaN(parsed)) {
+        return parsed;
+      }
+    }
+    return null;
+  };
+  const direct = coerce(input);
+  if (direct !== null) {
+    return direct;
+  }
+  if (Array.isArray(input)) {
+    for (const entry of input) {
+      const value = coerce(entry);
+      if (value !== null) {
+        return value;
+      }
+    }
   }
   return fallback;
 }
@@ -135,7 +163,7 @@ export function normalizeFirst2FinishConfig(value: unknown): First2FinishConfig 
     reviewer: ensureString(base.reviewer, fallback.reviewer),
     submitters: uniqueSubmitters.length >= 2 ? uniqueSubmitters : fallback.submitters,
     scorecardId: ensureString(base.scorecardId, fallback.scorecardId),
-    prizes: ensurePrizeTuple(base.prizes, fallback.prizes)
+    prize: ensureSinglePrize(base.prize ?? base.prizes, fallback.prize)
   };
 }
 

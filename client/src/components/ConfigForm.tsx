@@ -22,6 +22,7 @@ type ListInputs = {
   reviewer: string;
   submitters: string;
   prizes: string;
+  prize: string;
 };
 
 export default function ConfigForm({ flow, config, onSaved }: Props) {
@@ -29,7 +30,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
   const [tracks, setTracks] = useState<any[]>([]);
   const [scorecards, setScorecards] = useState<any[]>([]);
   const [formConfig, setFormConfig] = useState<FullChallengeConfig | First2FinishConfig>(() => getFlowConfig(config, flow));
-  const [listInputs, setListInputs] = useState<ListInputs>({ reviewers: '', reviewer: '', submitters: '', prizes: '' });
+  const [listInputs, setListInputs] = useState<ListInputs>({ reviewers: '', reviewer: '', submitters: '', prizes: '', prize: '' });
   const isFull = flow === 'full';
 
   const activeConfig = useMemo(() => getFlowConfig(config, flow), [config, flow]);
@@ -60,7 +61,12 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
         : '',
       reviewer: !isFull ? (activeConfig as First2FinishConfig).reviewer ?? '' : '',
       submitters: Array.isArray(activeConfig.submitters) ? activeConfig.submitters.join(', ') : '',
-      prizes: Array.isArray(activeConfig.prizes) ? activeConfig.prizes.join(', ') : ''
+      prizes: isFull && Array.isArray((activeConfig as FullChallengeConfig).prizes)
+        ? (activeConfig as FullChallengeConfig).prizes.join(', ')
+        : '',
+      prize: !isFull && typeof (activeConfig as First2FinishConfig).prize === 'number'
+        ? String((activeConfig as First2FinishConfig).prize)
+        : ''
     });
   }, [activeConfig, isFull]);
 
@@ -138,6 +144,18 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
       .map(entry => Number(entry))
       .filter(entry => !Number.isNaN(entry));
     update('prizes', entries as [number, number, number]);
+  };
+
+  const updatePrize = (value: string) => {
+    setListInputs(prev => ({ ...prev, prize: value }));
+    if (!value.trim()) {
+      update('prize', 0);
+      return;
+    }
+    const amount = Number.parseFloat(value);
+    if (!Number.isNaN(amount)) {
+      update('prize', amount);
+    }
   };
 
   return (
@@ -263,8 +281,8 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
             />
           </div>
           <div className="col">
-            <label>Prizes (1st, 2nd, 3rd)</label>
-            <input value={listInputs.prizes} onChange={e => updatePrizes(e.target.value)} />
+            <label>Prize (winner)</label>
+            <input value={listInputs.prize} onChange={e => updatePrize(e.target.value)} />
           </div>
         </div>
       )}
