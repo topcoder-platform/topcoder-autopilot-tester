@@ -1,4 +1,4 @@
-export type FlowVariant = 'full' | 'first2finish';
+export type FlowVariant = 'full' | 'first2finish' | 'topgear';
 
 export type PrizeTuple = [number, number, number];
 
@@ -14,6 +14,7 @@ export type FullChallengeConfig = {
   submissionsPerSubmitter: number;
   scorecardId: string;
   prizes: PrizeTuple;
+  submissionZipPath: string;
 };
 
 export type First2FinishConfig = {
@@ -27,11 +28,15 @@ export type First2FinishConfig = {
   submitters: string[];
   scorecardId: string;
   prize: number;
+  submissionZipPath: string;
 };
+
+export type TopgearConfig = First2FinishConfig;
 
 export type AppConfig = {
   fullChallenge: FullChallengeConfig;
   first2finish: First2FinishConfig;
+  topgear: TopgearConfig;
 };
 
 export type FlowStep = {

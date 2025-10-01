@@ -9,6 +9,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.645.0",
     "axios": "^1.7.2",
     "cors": "^2.8.5",
     "dayjs": "^1.11.13",

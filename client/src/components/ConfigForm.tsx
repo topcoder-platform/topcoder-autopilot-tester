@@ -4,11 +4,21 @@ import type {
   AppConfig,
   First2FinishConfig,
   FlowVariant,
-  FullChallengeConfig
+  FullChallengeConfig,
+  TopgearConfig
 } from '../types'
 
 function getFlowConfig(config: AppConfig, flow: FlowVariant): FullChallengeConfig | First2FinishConfig {
-  return flow === 'full' ? config.fullChallenge : config.first2finish;
+  switch (flow) {
+    case 'full':
+      return config.fullChallenge;
+    case 'first2finish':
+      return config.first2finish;
+    case 'topgear':
+      return config.topgear;
+    default:
+      return config.fullChallenge;
+  }
 }
 
 type Props = {
@@ -32,6 +42,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
   const [formConfig, setFormConfig] = useState<FullChallengeConfig | First2FinishConfig>(() => getFlowConfig(config, flow));
   const [listInputs, setListInputs] = useState<ListInputs>({ reviewers: '', reviewer: '', submitters: '', prizes: '', prize: '' });
   const isFull = flow === 'full';
+  const iterativeLabel = flow === 'topgear' ? 'Topgear Task' : 'First2Finish';
 
   const activeConfig = useMemo(() => getFlowConfig(config, flow), [config, flow]);
 
@@ -111,7 +122,8 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
     const payload: AppConfig = {
       ...config,
       fullChallenge: flow === 'full' ? formConfig as FullChallengeConfig : config.fullChallenge,
-      first2finish: flow === 'first2finish' ? formConfig as First2FinishConfig : config.first2finish
+      first2finish: flow === 'first2finish' ? formConfig as First2FinishConfig : config.first2finish,
+      topgear: flow === 'topgear' ? formConfig as TopgearConfig : config.topgear
     };
     await axios.post('/api/config', payload);
     onSaved();
@@ -160,7 +172,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
 
   return (
     <form className="card" onSubmit={save}>
-      <h3>Edit {flow === 'full' ? 'Full Challenge' : 'First2Finish'} Configuration</h3>
+      <h3>Edit {flow === 'full' ? 'Full Challenge' : iterativeLabel} Configuration</h3>
 
       <div className="row">
         <div className="col">
@@ -210,7 +222,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
           />
           {!isFull ? (
             <small style={{ display: 'block', marginTop: 4, color: '#94a3b8' }}>
-              First2Finish uses a fixed timeline template.
+              {iterativeLabel} uses a fixed timeline template.
             </small>
           ) : null}
         </div>
@@ -247,7 +259,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
       ) : (
         <div className="row">
           <div className="col">
-            <label>Reviewer handle</label>
+            <label>Iterative Reviewer handle</label>
             <input value={listInputs.reviewer} onChange={e => updateReviewer(e.target.value)} />
           </div>
           <div className="col">
@@ -296,12 +308,23 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
         </div>
       ) : null}
 
+      <div className="row">
+        <div className="col">
+          <label>Submission zip path</label>
+          <input
+            value={formConfig.submissionZipPath}
+            onChange={e => update('submissionZipPath', e.target.value)}
+            placeholder="./path/to/submission.zip"
+          />
+        </div>
+      </div>
+
       {!isFull ? (
         <div className="row">
           <div className="col">
             <label>Additional Notes</label>
             <div className="pill" style={{ display: 'inline-block' }}>
-              First2Finish runs with one reviewer and iterative submissions.
+              {iterativeLabel} runs with one reviewer and iterative submissions.
             </div>
           </div>
         </div>

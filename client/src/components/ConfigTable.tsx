@@ -1,64 +1,80 @@
 
 import React from 'react'
-import type { First2FinishConfig, FlowVariant, FullChallengeConfig } from '../types'
+import type { First2FinishConfig, FlowVariant, FullChallengeConfig, TopgearConfig } from '../types'
 
 type Props = {
   flow: FlowVariant;
   config: FullChallengeConfig | First2FinishConfig;
 };
 
+function buildFullEntries(config: FullChallengeConfig) {
+  return [
+    { label: 'Challenge name prefix', value: config.challengeNamePrefix?.trim() || '-' },
+    { label: 'Project ID', value: config.projectId ?? '-' },
+    { label: 'Challenge Type ID', value: config.challengeTypeId ?? '-' },
+    { label: 'Challenge Track ID', value: config.challengeTrackId ?? '-' },
+    { label: 'Timeline Template ID', value: config.timelineTemplateId ?? '-' },
+    { label: 'Copilot handle', value: config.copilotHandle?.trim() || '-' },
+    {
+      label: 'Reviewers',
+      value: Array.isArray(config.reviewers) && config.reviewers.length
+        ? config.reviewers.join(', ')
+        : '-'
+    },
+    {
+      label: 'Submitters',
+      value: Array.isArray(config.submitters) && config.submitters.length
+        ? config.submitters.join(', ')
+        : '-'
+    },
+    { label: 'Submissions per submitter', value: config.submissionsPerSubmitter ?? '-' },
+    { label: 'Scorecard ID', value: config.scorecardId ?? '-' },
+    {
+      label: 'Prizes',
+      value: Array.isArray(config.prizes) && config.prizes.length
+        ? config.prizes.join(', ')
+        : '-'
+    },
+    {
+      label: 'Submission zip path',
+      value: config.submissionZipPath?.trim() || '-'
+    }
+  ];
+}
+
+function buildIterativeEntries(config: First2FinishConfig | TopgearConfig) {
+  return [
+    { label: 'Challenge name prefix', value: config.challengeNamePrefix?.trim() || '-' },
+    { label: 'Project ID', value: config.projectId ?? '-' },
+    { label: 'Challenge Type ID', value: config.challengeTypeId ?? '-' },
+    { label: 'Challenge Track ID', value: config.challengeTrackId ?? '-' },
+    { label: 'Timeline Template ID', value: config.timelineTemplateId ?? '-' },
+    { label: 'Copilot handle', value: config.copilotHandle?.trim() || '-' },
+    { label: 'Iterative Reviewer', value: config.reviewer?.trim() || '-' },
+    {
+      label: 'Submitters',
+      value: Array.isArray(config.submitters) && config.submitters.length
+        ? config.submitters.join(', ')
+        : '-'
+    },
+    { label: 'Scorecard ID', value: config.scorecardId ?? '-' },
+    {
+      label: 'Prize',
+      value: typeof config.prize === 'number'
+        ? config.prize
+        : '-'
+    },
+    {
+      label: 'Submission zip path',
+      value: config.submissionZipPath?.trim() || '-'
+    }
+  ];
+}
+
 export default function ConfigTable({ flow, config }: Props) {
   const entries = flow === 'full'
-    ? [
-        { label: 'Challenge name prefix', value: (config as FullChallengeConfig).challengeNamePrefix?.trim() || '-' },
-        { label: 'Project ID', value: (config as FullChallengeConfig).projectId ?? '-' },
-        { label: 'Challenge Type ID', value: (config as FullChallengeConfig).challengeTypeId ?? '-' },
-        { label: 'Challenge Track ID', value: (config as FullChallengeConfig).challengeTrackId ?? '-' },
-        { label: 'Timeline Template ID', value: (config as FullChallengeConfig).timelineTemplateId ?? '-' },
-        { label: 'Copilot handle', value: (config as FullChallengeConfig).copilotHandle?.trim() || '-' },
-        {
-          label: 'Reviewers',
-          value: Array.isArray((config as FullChallengeConfig).reviewers) && (config as FullChallengeConfig).reviewers.length
-            ? (config as FullChallengeConfig).reviewers.join(', ')
-            : '-'
-        },
-        {
-          label: 'Submitters',
-          value: Array.isArray((config as FullChallengeConfig).submitters) && (config as FullChallengeConfig).submitters.length
-            ? (config as FullChallengeConfig).submitters.join(', ')
-            : '-'
-        },
-        { label: 'Submissions per submitter', value: (config as FullChallengeConfig).submissionsPerSubmitter ?? '-' },
-        { label: 'Scorecard ID', value: (config as FullChallengeConfig).scorecardId ?? '-' },
-        {
-          label: 'Prizes',
-          value: Array.isArray((config as FullChallengeConfig).prizes) && (config as FullChallengeConfig).prizes.length
-            ? (config as FullChallengeConfig).prizes.join(', ')
-            : '-'
-        }
-      ]
-    : [
-        { label: 'Challenge name prefix', value: (config as First2FinishConfig).challengeNamePrefix?.trim() || '-' },
-        { label: 'Project ID', value: (config as First2FinishConfig).projectId ?? '-' },
-        { label: 'Challenge Type ID', value: (config as First2FinishConfig).challengeTypeId ?? '-' },
-        { label: 'Challenge Track ID', value: (config as First2FinishConfig).challengeTrackId ?? '-' },
-        { label: 'Timeline Template ID', value: (config as First2FinishConfig).timelineTemplateId ?? '-' },
-        { label: 'Copilot handle', value: (config as First2FinishConfig).copilotHandle?.trim() || '-' },
-        { label: 'Reviewer', value: (config as First2FinishConfig).reviewer?.trim() || '-' },
-        {
-          label: 'Submitters',
-          value: Array.isArray((config as First2FinishConfig).submitters) && (config as First2FinishConfig).submitters.length
-            ? (config as First2FinishConfig).submitters.join(', ')
-            : '-'
-        },
-        { label: 'Scorecard ID', value: (config as First2FinishConfig).scorecardId ?? '-' },
-        {
-          label: 'Prize',
-          value: typeof (config as First2FinishConfig).prize === 'number'
-            ? (config as First2FinishConfig).prize
-            : '-'
-        }
-      ];
+    ? buildFullEntries(config as FullChallengeConfig)
+    : buildIterativeEntries(config as First2FinishConfig | TopgearConfig);
 
   return (
     <div className="card">

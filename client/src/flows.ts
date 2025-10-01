@@ -32,7 +32,9 @@ const first2FinishSteps: FlowStep[] = [
   { id: 'activate', label: 'Activate' },
   { id: 'awaitRegSubOpen', label: 'Await Reg/Sub Open' },
   { id: 'assignResources', label: 'Assign Resources' },
-  { id: 'processSubmissions', label: 'Process Submissions' },
+  { id: 'loadInitialSubmissions', label: 'Load Submissions' },
+  { id: 'processReviews', label: 'Process Reviews' },
+  { id: 'finalSubmission', label: 'Final Submission' },
   { id: 'awaitWinner', label: 'Await Winner' }
 ];
 
@@ -47,8 +49,14 @@ export const FLOW_DEFINITIONS: Record<FlowVariant, FlowDefinition> = {
     key: 'first2finish',
     tabLabel: 'First2Finish',
     steps: first2FinishSteps,
-    defaultToStep: 'processSubmissions'
+    defaultToStep: 'loadInitialSubmissions'
+  },
+  topgear: {
+    key: 'topgear',
+    tabLabel: 'Topgear Task',
+    steps: first2FinishSteps,
+    defaultToStep: 'loadInitialSubmissions'
   }
 };
 
-export const ORDERED_FLOW_KEYS: FlowVariant[] = ['full', 'first2finish'];
+export const ORDERED_FLOW_KEYS: FlowVariant[] = ['full', 'first2finish', 'topgear'];

@@ -171,6 +171,11 @@ export const TC = {
     const { data } = await ax.put(`https://api.topcoder-dev.com/v6/challenges/${id}`, payload);
     return data;
   },
+  async patchChallenge(token: string, id: string, payload: any) {
+    const ax = axiosWithAuth(token);
+    const { data } = await ax.patch(`https://api.topcoder-dev.com/v6/challenges/${id}`, payload);
+    return data;
+  },
   async activateChallenge(token: string, id: string) {
     const ax = axiosWithAuth(token);
     const { data } = await ax.patch(`https://api.topcoder-dev.com/v6/challenges/${id}`, { status: 'ACTIVE' });

@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid';
 import { RunnerLogger, type StepRequestLog, type StepStatus } from '../utils/logger.js';
 import { setActiveStepRequestRecorder, type StepRequestLogInput } from '../utils/stepRequestRecorder.js';
 import { getToken, TC } from './topcoder.js';
+import { loadSubmissionArtifact, uploadSubmissionArtifact } from './submissionUploader.js';
 import type { FlowConfig } from '../types/config.js';
 
 type CancellationHelpers = {
@@ -77,6 +78,10 @@ function maybeStop(mode: RunMode, toStep: StepName|undefined, current: StepName,
   }
 }
 
+const DEFAULT_REVIEW_PHASE_ID = 'aa5a3f78-79e0-4bf7-93ff-b11e8f5b398b';
+const DEFAULT_REVIEWER_BASE_PAYMENT = 50;
+const DEFAULT_REVIEWER_INCREMENTAL_PAYMENT = 20;
+
 const STEPS: StepName[] = [
   'token','createChallenge','updateDraft','activate',
   'awaitRegSubOpen','assignResources','createSubmissions',
@@ -144,6 +149,53 @@ function extractStepFailure(error: any): StepRequestLog {
     outcome: 'failure'
   };
   return failure;
+}
+
+function toStringId(value: unknown) {
+  if (typeof value === 'string' && value.trim()) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return undefined;
+}
+
+async function resolvePhaseIdByName(
+  log: RunnerLogger,
+  token: string,
+  challengeId: string,
+  phaseName: string,
+  cancel: CancellationHelpers
+): Promise<string | undefined> {
+  const normalized = phaseName.trim().toLowerCase();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    cancel.check();
+    try {
+      const challenge = await TC.getChallenge(token, challengeId);
+      const phases = Array.isArray(challenge?.phases) ? challenge.phases : [];
+      for (const phase of phases) {
+        if (!phase) continue;
+        const name = typeof phase.name === 'string' ? phase.name.toLowerCase() : '';
+        if (name !== normalized) continue;
+        const candidate =
+          toStringId((phase as any).id) ||
+          toStringId((phase as any).phaseId) ||
+          toStringId((phase as any).phase_id) ||
+          toStringId((phase as any).legacyId);
+        if (candidate) {
+          return candidate;
+        }
+      }
+    } catch (error: any) {
+      log.warn('Failed to load challenge while locating phase ID', {
+        challengeId,
+        phase: phaseName,
+        attempt: attempt + 1,
+        error: error?.message || String(error)
+      });
+    }
+    if (attempt < 2) {
+      await cancel.wait(500);
+    }
+  }
+  return undefined;
 }
 
 async function withStep<T>(
@@ -360,6 +412,9 @@ async function stepUpdateDraft(
 ) {
   cancel.check();
   log.info('Updating challenge to DRAFT with 1-minute timeline...');
+  const reviewerCount = Math.max(Array.isArray(cfg.reviewers) ? cfg.reviewers.length : 0, 1);
+  const reviewPhaseId = (await resolvePhaseIdByName(log, token, challengeId, 'Review', cancel))
+    ?? DEFAULT_REVIEW_PHASE_ID;
   const nowIso = dayjs().toISOString();
   const body = {
     typeId: cfg.challengeTypeId,
@@ -377,6 +432,17 @@ async function stepUpdateDraft(
       { type: 'COPILOT', prizes: [{ type: 'USD', value: 100 }]}
     ],
     winners: [], discussions: [],
+    reviewers: [
+      {
+        scorecardId: cfg.scorecardId,
+        isMemberReview: true,
+        memberReviewerCount: reviewerCount,
+        phaseId: reviewPhaseId,
+        basePayment: DEFAULT_REVIEWER_BASE_PAYMENT,
+        incrementalPayment: DEFAULT_REVIEWER_INCREMENTAL_PAYMENT,
+        type: 'REGULAR_REVIEW'
+      }
+    ],
     task: { isTask: false, isAssigned: false },
     skills: [{ name: 'Java', id: '63bb7cfc-b0d4-4584-820a-18c503b4b0fe' }],
     legacy: {
@@ -393,6 +459,12 @@ async function stepUpdateDraft(
   const updated = await TC.updateChallenge(token, challengeId, body);
   cancel.check();
   log.info('Challenge updated to DRAFT', { challengeId, request: body }, getStepProgress('updateDraft'));
+  log.info('Configured review settings', {
+    challengeId,
+    reviewPhaseId,
+    reviewerCount,
+    scorecardId: cfg.scorecardId
+  });
   return updated;
 }
 
@@ -599,37 +671,126 @@ async function stepCreateSubmissions(
 ) {
   const { writeLastRun, readLastRun } = await import('../utils/lastRun.js');
 
-log.info('Creating submissions...');
-const lr = readLastRun();
-lr.submissions = lr.submissions || {};
-let createdCount = 0;
-for (const h of cfg.submitters) {
+  log.info('Preparing submission artifact from disk', { configuredPath: cfg.submissionZipPath });
+  const artifact = await loadSubmissionArtifact(cfg.submissionZipPath);
   cancel.check();
-  const mem = await TC.getMemberByHandle(token, h);
-  cancel.check();
-  for (let i=0; i<cfg.submissionsPerSubmitter; i++) {
-    cancel.check();
-    const payload = {
-      challengeId, memberId: String(mem.userId),
-      type: 'CONTEST_SUBMISSION',
-      url: `https://example.com/submission-${h}-${i+1}.zip`
-    };
-    log.info('REQ createSubmission', payload);
-    const sub = await TC.createSubmission(token, payload);
-    cancel.check();
-    log.info('RES createSubmission', sub);
-    log.info('Submission created', { handle: h, submissionId: sub.id });
-    lr.submissions[h] = lr.submissions[h] || [];
-    lr.submissions[h].push(sub.id);
-    writeLastRun(lr);
-    createdCount += 1;
-  }
-}
+  log.info('Submission artifact ready', { path: artifact.absolutePath, size: artifact.size });
 
-log.info('Submissions created', { count: createdCount }, getStepProgress('createSubmissions'));
+  const lr = readLastRun();
+  lr.submissions = lr.submissions || {};
+  let createdCount = 0;
+  for (const h of cfg.submitters) {
+    cancel.check();
+    const mem = await TC.getMemberByHandle(token, h);
+    cancel.check();
+    for (let i = 0; i < cfg.submissionsPerSubmitter; i++) {
+      cancel.check();
+      const upload = await uploadSubmissionArtifact(log, artifact);
+      cancel.check();
+      const payload = {
+        challengeId,
+        memberId: String(mem.userId),
+        type: 'CONTEST_SUBMISSION',
+        url: upload.url
+      };
+      log.info('REQ createSubmission', { ...payload, storageKey: upload.key });
+      const sub = await TC.createSubmission(token, payload);
+      cancel.check();
+      log.info('RES createSubmission', { id: sub.id, handle: h, storageKey: upload.key });
+      log.info('Submission created', { handle: h, submissionId: sub.id, storageKey: upload.key });
+      lr.submissions[h] = lr.submissions[h] || [];
+      lr.submissions[h].push(sub.id);
+      writeLastRun(lr);
+      createdCount += 1;
+    }
+  }
+
+  log.info('Submissions created', { count: createdCount }, getStepProgress('createSubmissions'));
 }
 
 function randPick<T>(arr: T[]): T { return arr[Math.floor(Math.random()*arr.length)]; }
+
+function buildMarkdownReviewItemComment(question: any, answerLabel: string, extraLines: string[] = []): string {
+  const rawDescription = typeof question?.description === 'string' ? question.description.trim() : '';
+  const description = rawDescription || `Question ${question?.id ?? ''}`.trim() || 'Review item';
+  const lines = [
+    '### Automated Review Summary',
+    '',
+    `**Question:** ${description}`,
+    `**Recorded Answer:** ${answerLabel}`
+  ];
+  if (extraLines.length) {
+    lines.push('', ...extraLines);
+  }
+  lines.push(
+    '',
+    '- Supporting references:',
+    '  - [Design spec](https://example.com/design)',
+    '  - [Execution logs](https://example.com/logs)',
+    '',
+    '```bash',
+    'npm run verify',
+    '```',
+    '',
+    '#### Attachments',
+    '![Evidence 1](https://placehold.co/640x320?text=Evidence+1)',
+    '![Evidence 2](https://placehold.co/640x320?text=Evidence+2)',
+    '',
+    '> _Markdown payload for validation._'
+  );
+  return lines.join('\n');
+}
+
+function buildAppealMarkdown(question: any, submitterHandle: string): string {
+  const actor = submitterHandle ? `@${submitterHandle}` : 'the submitter';
+  const rawDescription = typeof question?.description === 'string' ? question.description.trim() : '';
+  const description = rawDescription || `Question ${question?.id ?? ''}`.trim() || 'review item';
+  return [
+    `### Appeal from ${actor}`,
+    '',
+    `**Question:** ${description}`,
+    '',
+    'During retest we executed `npm run verify` and confirmed the acceptance criteria.',
+    '',
+    '#### Evidence',
+    '- ✅ Steps 1-3 produce the expected output',
+    '- ✅ API payload matches the contract',
+    '',
+    '![Actual Output](https://placehold.co/640x320?text=Actual+Output)',
+    '![Expected Output](https://placehold.co/640x320?text=Expected+Output)',
+    '',
+    '> Please reconsider the deduction based on the attached evidence.'
+  ].join('\n');
+}
+
+function buildAppealResponseMarkdown(success: boolean, reviewerHandle?: string, question?: any): string {
+  const reviewer = reviewerHandle ? `@${reviewerHandle}` : 'Reviewer';
+  const rawDescription = typeof question?.description === 'string' ? question.description.trim() : '';
+  const description = rawDescription || `Question ${question?.id ?? ''}`.trim() || 'review item';
+  const heading = success ? '✅ Appeal Accepted' : '❌ Appeal Rejected';
+  const outcomeNote = success
+    ? 'Score adjusted upward based on the new evidence.'
+    : 'Original score remains unchanged after re-evaluation.';
+  return [
+    `### ${heading}`,
+    '',
+    `**Reviewer:** ${reviewer}`,
+    `**Question:** ${description}`,
+    '',
+    '#### Review Notes',
+    '- Evidence cross-checked against the design specification',
+    '- Automation logs re-run for confirmation',
+    '',
+    '```bash',
+    'npm run audit',
+    '```',
+    '',
+    '![Response Evidence 1](https://placehold.co/640x320?text=Response+Evidence+1)',
+    '![Response Evidence 2](https://placehold.co/640x320?text=Response+Evidence+2)',
+    '',
+    `> ${outcomeNote}`
+  ].join('\n');
+}
 function randInt(min: number, max: number) { return Math.floor(Math.random()*(max-min+1))+min; }
 
 async function stepCreateReviews(
@@ -754,12 +915,20 @@ async function stepCreateReviews(
         const reviewItems = questions.map(q => {
           if (q.type === 'YES_NO') {
             const existingItem = itemsByQuestion.get(String(q.id));
+            const answer = randPick(['YES', 'NO']);
+            const commentContent = buildMarkdownReviewItemComment(q, answer, [
+              '#### Checklist',
+              '- [x] Regression suite executed',
+              '- [ ] Manual QA sign-off pending',
+              '',
+              '`Tracking ID:` `auto-review-yes-no`'
+            ]);
             const payload: any = {
               scorecardQuestionId: q.id,
-              initialAnswer: randPick(['YES','NO']),
+              initialAnswer: answer,
               reviewItemComments: [{
-                content: `Auto review for ${q.description}`,
-                type: randPick(['COMMENT','REQUIRED','RECOMMENDED']),
+                content: commentContent,
+                type: randPick(['COMMENT', 'REQUIRED', 'RECOMMENDED']),
                 sortOrder: 1
               }]
             };
@@ -767,12 +936,20 @@ async function stepCreateReviews(
             return payload;
           } else if (q.type === 'SCALE') {
             const existingItem = itemsByQuestion.get(String(q.id));
+            const min = typeof q.scaleMin === 'number' ? q.scaleMin : 1;
+            const max = typeof q.scaleMax === 'number' ? q.scaleMax : 10;
+            const value = String(randInt(min, max));
+            const commentContent = buildMarkdownReviewItemComment(q, value, [
+              `**Scale Range:** ${min} – ${max}`,
+              '- _Higher scores indicate stronger coverage._',
+              '`Metric:` `performance-index`'
+            ]);
             const payload: any = {
               scorecardQuestionId: q.id,
-              initialAnswer: String(randInt(q.scaleMin || 1, q.scaleMax || 10)),
+              initialAnswer: value,
               reviewItemComments: [{
-                content: `Auto review score between ${q.scaleMin}-${q.scaleMax}`,
-                type: randPick(['COMMENT','REQUIRED','RECOMMENDED']),
+                content: commentContent,
+                type: randPick(['COMMENT', 'REQUIRED', 'RECOMMENDED']),
                 sortOrder: 1
               }]
             };
@@ -780,10 +957,15 @@ async function stepCreateReviews(
             return payload;
           } else {
             const existingItem = itemsByQuestion.get(String(q.id));
+            const fallbackAnswer = 'YES';
+            const commentContent = buildMarkdownReviewItemComment(q, fallbackAnswer, [
+              '*Fallback evaluation applied for non-standard question type.*',
+              '`Tracking ID:` `auto-review-generic`'
+            ]);
             const payload: any = {
               scorecardQuestionId: q.id,
-              initialAnswer: 'YES',
-              reviewItemComments: [{ content: 'Auto answer', type: 'COMMENT', sortOrder: 1 }]
+              initialAnswer: fallbackAnswer,
+              reviewItemComments: [{ content: commentContent, type: 'COMMENT', sortOrder: 1 }]
             };
             if (existingItem?.id !== undefined) payload.id = existingItem.id;
             return payload;
@@ -947,17 +1129,18 @@ async function stepCreateAppeals(
           log.warn('No challenge resource found for submitter; skipping appeal creation', { submitterHandle });
           continue;
         }
+        const question = questionsById.get(String(item?.scorecardQuestionId ?? ''));
+        const content = buildAppealMarkdown(question, submitterHandle);
         const payload = {
           resourceId,
           reviewItemCommentId: commentId,
-          content: 'Appeal: We believe this should be adjusted.'
+          content
         };
         try {
           log.info('REQ createAppeal', payload);
           const a = await TC.createAppeal(token, payload);
           cancel.check();
           log.info('RES createAppeal', a);
-          const question = questionsById.get(String(item?.scorecardQuestionId ?? ''));
           appeals.push({ appeal: a, review: r, reviewItem: item, question });
           appealedCommentIds.add(commentId);
           ap.push(a.id);
@@ -1071,6 +1254,7 @@ async function stepAppealResponses(
     cancel.check();
     const success = Math.random() < 0.5;
 
+    const responseContent = buildAppealResponseMarkdown(success, entry.review?.reviewerHandle, entry.question);
     let reviewerResourceId: string | undefined;
     try {
       reviewerResourceId = getReviewerResourceId(entry.review);
@@ -1081,7 +1265,7 @@ async function stepAppealResponses(
       const payload = {
         appealId: entry.appeal.id,
         resourceId: reviewerResourceId, // reviewer responding
-        content: success ? 'Appeal accepted. Score adjusted.' : 'Appeal rejected. Score stands.',
+        content: responseContent,
         success
       };
       log.info('REQ respondToAppeal', payload);
@@ -1162,7 +1346,7 @@ async function stepAppealResponses(
       }
     } catch (e:any) {
       log.warn('Appeal response failed', { error: e?.message || String(e) });
-      ctx?.recordFailure(e, { requestBody: { appealId: entry.appeal.id, resourceId: reviewerResourceId, content: success ? 'Appeal accepted. Score adjusted.' : 'Appeal rejected. Score stands.', success } });
+      ctx?.recordFailure(e, { requestBody: { appealId: entry.appeal.id, resourceId: reviewerResourceId, content: responseContent, success } });
     }
   }
   log.info('Appeal responses processed', { count: appeals.length }, getStepProgress('appealResponses'));

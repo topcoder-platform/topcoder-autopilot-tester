@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid';
 import { RunnerLogger, type StepRequestLog, type StepStatus } from '../utils/logger.js';
 import { setActiveStepRequestRecorder, type StepRequestLogInput } from '../utils/stepRequestRecorder.js';
 import { getToken, TC } from './topcoder.js';
+import { loadSubmissionArtifact, uploadSubmissionArtifact } from './submissionUploader.js';
 import type { First2FinishConfig } from '../types/config.js';
 
 export type RunMode = 'full' | 'toStep';
@@ -13,7 +14,9 @@ export type StepName =
   | 'activate'
   | 'awaitRegSubOpen'
   | 'assignResources'
-  | 'processSubmissions'
+  | 'loadInitialSubmissions'
+  | 'processReviews'
+  | 'finalSubmission'
   | 'awaitWinner';
 
 const STEPS: StepName[] = [
@@ -23,11 +26,18 @@ const STEPS: StepName[] = [
   'activate',
   'awaitRegSubOpen',
   'assignResources',
-  'processSubmissions',
+  'loadInitialSubmissions',
+  'processReviews',
+  'finalSubmission',
   'awaitWinner'
 ];
 
 const PROGRESS_STEPS: StepName[] = STEPS.filter(step => step !== 'token');
+
+const INITIAL_SUBMISSIONS_PER_SUBMITTER = 2;
+const INITIAL_SUBMISSION_DELAY_MS = 10_000;
+
+const ITERATIVE_REVIEW_PHASE_ID = '003a4b14-de5d-43fc-9e35-835dbeb6af1f';
 
 function getStepProgress(step: StepName): number | undefined {
   const idx = PROGRESS_STEPS.indexOf(step);
@@ -295,7 +305,8 @@ async function stepUpdateDraft(
   token: string,
   cfg: First2FinishConfig,
   challengeId: string,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  submissionPhaseName: string
 ) {
   cancel.check();
   log.info('Updating challenge to DRAFT with condensed timeline...');
@@ -317,6 +328,17 @@ async function stepUpdateDraft(
       { type: 'COPILOT', prizes: [{ type: 'USD', value: 100 }] }
     ],
     winners: [],
+    reviewers: [
+      {
+        scorecardId: cfg.scorecardId,
+        isMemberReview: true,
+        memberReviewerCount: 1,
+        phaseId: ITERATIVE_REVIEW_PHASE_ID,
+        basePayment: 10,
+        incrementalPayment: 10,
+        type: 'ITERATIVE_REVIEW'
+      }
+    ],
     discussions: [],
     task: { isTask: false, isAssigned: false },
     skills: [{ name: 'Java', id: '63bb7cfc-b0d4-4584-820a-18c503b4b0fe' }],
@@ -337,8 +359,168 @@ async function stepUpdateDraft(
   };
   const updated = await TC.updateChallenge(token, challengeId, body);
   cancel.check();
+  const normalizedSubmissionPhase = submissionPhaseName.trim().toLowerCase();
+  if (normalizedSubmissionPhase === 'topgear submission') {
+    await ensureConcurrentRegistrationAndSubmission(log, token, challengeId, submissionPhaseName, cancel);
+    cancel.check();
+  }
   log.info('Challenge updated to DRAFT', { challengeId, request: body }, getStepProgress('updateDraft'));
   return updated;
+}
+
+function sanitizePhasePatchPayload(phase: any) {
+  const allowedKeys = [
+    'id',
+    'phaseId',
+    'duration',
+    'name',
+    'predecessor',
+    'predecessorId',
+    'scheduledStartDate',
+    'scheduledEndDate',
+    'fixedStartDate',
+    'actualStartDate',
+    'actualEndDate'
+  ];
+  const payload: Record<string, any> = {};
+  for (const key of allowedKeys) {
+    if (phase?.[key] !== undefined) {
+      payload[key] = phase[key];
+    }
+  }
+  if (phase?.predecessors !== undefined) {
+    payload.predecessors = Array.isArray(phase.predecessors) ? [...phase.predecessors] : phase.predecessors;
+  }
+  if (typeof payload.duration === 'string') {
+    const parsed = Number(payload.duration);
+    if (!Number.isNaN(parsed)) payload.duration = parsed;
+  }
+  return payload;
+}
+
+function collectPhaseIdentifiers(phase: any): string[] {
+  return [
+    toStringId(phase?.id),
+    toStringId(phase?.phaseId),
+    toStringId(phase?.phase_id),
+    toStringId(phase?.legacyId)
+  ].filter(Boolean) as string[];
+}
+
+function collectPredecessorIdentifiers(phase: any): string[] {
+  const ids = new Set<string>();
+  if (!phase) return [];
+  const add = (value: any) => {
+    const id = toStringId(value);
+    if (id) ids.add(id);
+  };
+  add(phase?.predecessor);
+  add((phase as any)?.predecessorId);
+  add((phase as any)?.predecessor_id);
+  const predecessor = (phase as any)?.predecessor;
+  if (predecessor && typeof predecessor === 'object') {
+    add(predecessor.id);
+    add(predecessor.phaseId);
+    add(predecessor.phase_id);
+  }
+  const predecessors = (phase as any)?.predecessors;
+  if (Array.isArray(predecessors)) {
+    for (const entry of predecessors) {
+      add(entry);
+      if (entry && typeof entry === 'object') {
+        add(entry.id);
+        add(entry.phaseId);
+        add(entry.phase_id);
+      }
+    }
+  }
+  return [...ids];
+}
+
+async function ensureConcurrentRegistrationAndSubmission(
+  log: RunnerLogger,
+  token: string,
+  challengeId: string,
+  submissionPhaseName: string,
+  cancel: CancellationHelpers
+) {
+  cancel.check();
+  log.info('Ensuring Topgear submission phase does not depend on Registration', {
+    challengeId,
+    submissionPhaseName
+  });
+  const challenge = await TC.getChallenge(token, challengeId);
+  cancel.check();
+  const phases = Array.isArray(challenge?.phases) ? challenge.phases : [];
+  if (!phases.length) {
+    log.warn('Challenge returned no phases when attempting to adjust submission predecessor', {
+      challengeId
+    });
+    return;
+  }
+
+  const findByName = (name: string) => {
+    const normalized = name.trim().toLowerCase();
+    return phases.find((phase: any) => typeof phase?.name === 'string' && phase.name.trim().toLowerCase() === normalized);
+  };
+
+  const registrationPhase = findByName('Registration');
+  const submissionPhase = findByName(submissionPhaseName);
+
+  if (!submissionPhase) {
+    log.warn('Submission phase not found while attempting to adjust predecessor', {
+      challengeId,
+      submissionPhaseName
+    });
+    return;
+  }
+
+  const registrationIds = new Set<string>(collectPhaseIdentifiers(registrationPhase));
+  const submissionPredecessors = collectPredecessorIdentifiers(submissionPhase);
+  const hasRegistrationDependency = submissionPredecessors.some((id) => registrationIds.has(id));
+
+  const registrationStart =
+    registrationPhase?.scheduledStartDate ||
+    registrationPhase?.actualStartDate ||
+    registrationPhase?.fixedStartDate;
+
+  const phasePatch = sanitizePhasePatchPayload(submissionPhase);
+  let mutated = false;
+
+  if (hasRegistrationDependency) {
+    phasePatch.predecessor = null;
+    phasePatch.predecessorId = null;
+    phasePatch.predecessors = [];
+    mutated = true;
+  }
+
+  if (registrationStart && phasePatch.scheduledStartDate !== registrationStart) {
+    phasePatch.scheduledStartDate = registrationStart;
+    if (typeof phasePatch.duration === 'number' && !Number.isNaN(phasePatch.duration)) {
+      phasePatch.scheduledEndDate = dayjs(registrationStart).add(phasePatch.duration, 'second').toISOString();
+    }
+    mutated = true;
+  }
+
+  if (!mutated) {
+    log.info('Topgear submission phase already concurrent with Registration', {
+      challengeId,
+      submissionPhaseName
+    });
+    return;
+  }
+
+  cancel.check();
+  await TC.patchChallenge(token, challengeId, { phases: [phasePatch] });
+  cancel.check();
+
+  log.info('Updated Topgear submission phase to remove Registration predecessor', {
+    challengeId,
+    submissionPhaseId: toStringId(phasePatch.id) || toStringId(phasePatch.phaseId),
+    submissionPhaseName,
+    removedDependency: hasRegistrationDependency,
+    alignedStartWithRegistration: Boolean(registrationStart)
+  });
 }
 
 async function stepActivate(
@@ -410,7 +592,7 @@ async function stepAssignResources(
 ): Promise<ReviewerAssignment> {
   const { readLastRun, writeLastRun } = await import('../utils/lastRun.js');
   cancel.check();
-  log.info('Assigning resources (copilot, reviewer, submitters)...');
+  log.info('Assigning resources (copilot, iterative reviewer, submitters)...');
   const lr = readLastRun();
   const reviewerResources = { ...(lr.reviewerResources || {}) } as Record<string, string>;
 
@@ -423,10 +605,10 @@ async function stepAssignResources(
     }
   }
   const submitterRole = roleIdByName['Submitter'];
-  const reviewerRole = roleIdByName['Reviewer'];
+  const iterativeReviewerRole = roleIdByName['Iterative Reviewer'];
   const copilotRole = roleIdByName['Copilot'];
   if (!submitterRole) log.warn('Submitter role not found; submissions may fail');
-  if (!reviewerRole) log.warn('Reviewer role not found; review assignment may fail');
+  if (!iterativeReviewerRole) log.warn('Iterative Reviewer role not found; review assignment may fail');
 
   if (cfg.copilotHandle && copilotRole) {
     cancel.check();
@@ -442,18 +624,18 @@ async function stepAssignResources(
   }
 
   let reviewerResourceId = reviewerResources[cfg.reviewer];
-  if (!reviewerResourceId && reviewerRole) {
+  if (!reviewerResourceId && iterativeReviewerRole) {
     cancel.check();
     log.info('REQ getMemberByHandle', { handle: cfg.reviewer });
     const reviewer = await TC.getMemberByHandle(token, cfg.reviewer);
     cancel.check();
     log.info('RES getMemberByHandle', { handle: cfg.reviewer, userId: reviewer.userId });
-    const payload = { challengeId, memberId: String(reviewer.userId), roleId: reviewerRole };
+    const payload = { challengeId, memberId: String(reviewer.userId), roleId: iterativeReviewerRole };
     log.info('REQ addResource', payload);
     const added = await TC.addResource(token, payload);
     cancel.check();
     reviewerResourceId = added?.id ? String(added.id) : added?.resourceId ? String(added.resourceId) : reviewerResourceId;
-    log.info('RES addResource', { ok: true, role: 'Reviewer', resourceId: reviewerResourceId });
+    log.info('RES addResource', { ok: true, role: 'Iterative Reviewer', resourceId: reviewerResourceId });
     if (reviewerResourceId) {
       reviewerResources[cfg.reviewer] = reviewerResourceId;
       writeLastRun({ reviewerResources });
@@ -479,7 +661,7 @@ async function stepAssignResources(
   }
 
   if (!reviewerResourceId) {
-    throw new Error('Failed to assign reviewer resource');
+    throw new Error('Failed to assign iterative reviewer resource');
   }
 
   writeLastRun({ challengeId, reviewerResources, submissions: {} });
@@ -496,23 +678,71 @@ type SubmissionRecord = {
 
 type ReviewOutcome = 'pass' | 'fail';
 
+type SubmissionHelpers = {
+  queueSubmission: (handleOverride?: string) => Promise<SubmissionRecord>;
+  completeReview: (step: StepName, record: SubmissionRecord, outcome: ReviewOutcome) => Promise<void>;
+  ensureIterativePhase: (expectOpen: boolean, step: StepName) => Promise<void>;
+  getCreatedRecords: () => SubmissionRecord[];
+  submitterHandles: string[];
+};
+
+type SubmissionFlowState = {
+  helpers: SubmissionHelpers;
+  initialBatch: SubmissionRecord[];
+};
+
+function buildIterativeReviewComment(outcome: ReviewOutcome): string {
+  if (outcome === 'pass') {
+    return [
+      '**Status:** ✅ Passed iterative review',
+      '',
+      '### Validation Notes',
+      '- [x] Automated smoke tests completed',
+      '- [x] Lint checks are clean',
+      '',
+      '`Command:` `npm run verify`',
+      '',
+      '![Passing evidence](https://placehold.co/640x320?text=Passing+Evidence)',
+      '![Log excerpt](https://placehold.co/640x320?text=System+Logs)',
+      '',
+      '> _Markdown payload for validation purposes._'
+    ].join('\n');
+  }
+
+  return [
+    '**Status:** ❌ Changes requested',
+    '',
+    '### Findings',
+    '1. UI regression detected on primary button.',
+    '2. Automated tests surfaced a failing contract check.',
+    '',
+    '`Command:` `npm run lint && npm test`',
+    '',
+    '![Blocking issue](https://placehold.co/640x320?text=Blocking+Issue)',
+    '![Error logs](https://placehold.co/640x320?text=Error+Logs)',
+    '',
+    '> Please address the findings and resubmit.'
+  ].join('\n');
+}
+
 async function ensureIterativePhaseState(
   log: RunnerLogger,
   token: string,
   challengeId: string,
   expectOpen: boolean,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  progressStep: StepName
 ) {
   const desiredOpen = expectOpen ? ['Iterative Review'] : [];
   const desiredClosed = expectOpen ? [] : ['Iterative Review'];
-  await stepAwaitPhasesOpen(log, token, challengeId, desiredOpen, 'processSubmissions', desiredClosed, cancel);
+  await stepAwaitPhasesOpen(log, token, challengeId, desiredOpen, progressStep, desiredClosed, cancel);
 }
 
 function buildReviewItems(questions: any[], outcome: ReviewOutcome) {
   return questions.map((q: any) => {
     if (!q || q.id === undefined) return null;
     const id = q.id;
-    const comments = [{ content: outcome === 'pass' ? 'Passing review' : 'Failing review', type: 'COMMENT', sortOrder: 1 }];
+    const comments = [{ content: buildIterativeReviewComment(outcome), type: 'COMMENT', sortOrder: 1 }];
     if (q.type === 'YES_NO') {
       return {
         scorecardQuestionId: id,
@@ -538,11 +768,40 @@ function buildReviewItems(questions: any[], outcome: ReviewOutcome) {
   }).filter(Boolean);
 }
 
+function toStringId(value: unknown) {
+  if (typeof value === 'string' && value.trim()) return value;
+  if (typeof value === 'number' && !Number.isNaN(value)) return String(value);
+  return undefined;
+}
+
+function collectValues(candidate: any, keys: string[]): string[] {
+  const results: string[] = [];
+  for (const key of keys) {
+    const value = toStringId(candidate?.[key]);
+    if (value) results.push(value);
+  }
+  return results;
+}
+
+function extractOpenIterativePhaseIds(challenge: any): string[] {
+  const phases = Array.isArray(challenge?.phases) ? challenge.phases : [];
+  const ids = new Set<string>();
+  for (const phase of phases) {
+    if (!phase || phase.name !== 'Iterative Review' || !phase.isOpen) continue;
+    for (const id of collectValues(phase, ['id', 'phaseId', 'phase_id', 'legacyId'])) {
+      ids.add(id);
+    }
+  }
+  if (!ids.size) ids.add(ITERATIVE_REVIEW_PHASE_ID);
+  return [...ids];
+}
+
 async function findPendingReview(
   token: string,
   challengeId: string,
   submissionId: string,
-  reviewerResourceId: string
+  reviewerResourceId?: string,
+  candidatePhaseIds: string[] = []
 ) {
   const listResponse = await TC.listReviews(token, challengeId);
   const reviews = Array.isArray(listResponse)
@@ -550,14 +809,105 @@ async function findPendingReview(
     : Array.isArray((listResponse as any)?.data)
       ? (listResponse as any).data
       : [];
-  return reviews.find((rev: any) => {
-    if (!rev) return false;
+
+  const normalizedSubmissionId = toStringId(submissionId);
+  const normalizedResourceId = toStringId(reviewerResourceId);
+  const normalizedPhaseIds = candidatePhaseIds
+    .map(id => toStringId(id))
+    .filter((id): id is string => Boolean(id));
+
+  const matches: any[] = [];
+  for (const rev of reviews) {
+    if (!rev) continue;
     const status = typeof rev.status === 'string' ? rev.status.toUpperCase() : '';
-    const matchesStatus = status === 'PENDING' || status === 'IN_PROGRESS';
-    const matchesSubmission = String(rev.submissionId ?? '') === submissionId;
-    const matchesReviewer = String(rev.resourceId ?? '') === reviewerResourceId;
-    return matchesStatus && matchesSubmission && matchesReviewer;
-  });
+    if (status !== 'PENDING' && status !== 'IN_PROGRESS') continue;
+    const revSubmissionId = toStringId(rev.submissionId);
+    if (!revSubmissionId || (normalizedSubmissionId && revSubmissionId !== normalizedSubmissionId)) continue;
+
+    const typeHints = collectValues(rev, ['type', 'typeId', 'reviewType']);
+    const metadataType = toStringId((rev.metadata as any)?.reviewType);
+    const isIterative = [...typeHints, metadataType]
+      .filter(Boolean)
+      .some(type => type!.toUpperCase().includes('ITERATIVE'));
+
+    const phaseCandidates = [
+      ...collectValues(rev, ['phaseId', 'phase_id', 'reviewPhaseId']),
+      toStringId((rev.metadata as any)?.phaseId),
+      toStringId((rev.metadata as any)?.reviewPhaseId)
+    ].filter(Boolean) as string[];
+
+    matches.push({
+      review: rev,
+      isIterative,
+      phaseMatch: normalizedPhaseIds.length === 0
+        ? false
+        : phaseCandidates.some(id => normalizedPhaseIds.includes(id)),
+      resourceMatch: normalizedResourceId !== undefined
+        ? toStringId(rev.resourceId) === normalizedResourceId
+        : false
+    });
+  }
+
+  const prioritized = (
+    matches.find(m => m.resourceMatch && m.phaseMatch) ||
+    matches.find(m => m.resourceMatch && m.isIterative) ||
+    matches.find(m => m.resourceMatch) ||
+    matches.find(m => m.phaseMatch && m.isIterative) ||
+    matches.find(m => m.phaseMatch) ||
+    matches.find(m => m.isIterative) ||
+    matches[0]
+  );
+
+  return prioritized?.review;
+}
+
+type IterativeTransitionResult =
+  | { status: 'closed'; pendingReview?: undefined; phaseIds: string[] }
+  | { status: 'pending'; pendingReview: any; phaseIds: string[] }
+  | { status: 'timeout'; pendingReview?: undefined; phaseIds: string[] };
+
+async function awaitIterativeTransition(
+  log: RunnerLogger,
+  token: string,
+  challengeId: string,
+  submissionId: string,
+  reviewerResourceId: string,
+  cancel: CancellationHelpers,
+  step: StepName
+): Promise<IterativeTransitionResult> {
+  let attempts = 0;
+  while (attempts < 12) {
+    cancel.check();
+    let phaseHints: string[] = [];
+    try {
+      const challenge = await TC.getChallenge(token, challengeId);
+      phaseHints = extractOpenIterativePhaseIds(challenge);
+      if (!phaseHints.length) {
+        log.info('Iterative review phase closed after failing review', { step }, getStepProgress(step));
+        return { status: 'closed', phaseIds: [] };
+      }
+    } catch (error: any) {
+      const message = error?.message || String(error);
+      log.warn('Failed to refresh challenge while monitoring iterative review transition; will retry', { step, attempt: attempts + 1, error: message });
+    }
+
+    const pending = await findPendingReview(token, challengeId, submissionId, reviewerResourceId, phaseHints);
+    if (pending) {
+      log.info('Detected pending iterative review after failure', {
+        step,
+        submissionId,
+        reviewId: toStringId(pending.id),
+        phaseIds: phaseHints
+      });
+      return { status: 'pending', pendingReview: pending, phaseIds: phaseHints };
+    }
+
+    await cancel.wait(5000);
+    attempts += 1;
+  }
+
+  log.warn('Timed out waiting for iterative review to close or reopen', { step, submissionId });
+  return { status: 'timeout', phaseIds: [] };
 }
 
 function pickSubmitter(handles: string[], index: number) {
@@ -566,29 +916,32 @@ function pickSubmitter(handles: string[], index: number) {
   return handle;
 }
 
-async function stepProcessSubmissions(
+async function prepareSubmissionHelpers(
   log: RunnerLogger,
   token: string,
   cfg: First2FinishConfig,
   challengeId: string,
   reviewer: ReviewerAssignment,
   cancel: CancellationHelpers
-) {
-  const TOTAL_SUBMISSIONS = 6;
-  const FAIL_COUNT = 4;
-  const PASS_INDEX = 5;
+): Promise<SubmissionHelpers> {
   const { readLastRun, writeLastRun } = await import('../utils/lastRun.js');
-  const lr = readLastRun();
-  const submissionsByHandle = { ...(lr.submissions || {}) } as Record<string, string[]>;
-  const reviewsByKey = { ...(lr.reviews || {}) } as Record<string, string>;
+  const lastRun = readLastRun();
+  const submissionsByHandle = { ...(lastRun.submissions || {}) } as Record<string, string[]>;
+  const reviewsByKey = { ...(lastRun.reviews || {}) } as Record<string, string>;
+
+  cancel.check();
+  log.info('Preparing submission artifact from disk', { configuredPath: cfg.submissionZipPath });
+  const artifact = await loadSubmissionArtifact(cfg.submissionZipPath);
+  cancel.check();
+  log.info('Submission artifact ready', { path: artifact.absolutePath, size: artifact.size });
 
   log.info('Fetching scorecard for iterative reviews', { scorecardId: cfg.scorecardId });
   const scorecard = await TC.getScorecard(token, cfg.scorecardId);
   cancel.check();
   const questions: any[] = [];
-  for (const group of (scorecard?.scorecardGroups || [])) {
-    for (const section of (group?.sections || [])) {
-      for (const question of (section?.questions || [])) {
+  for (const group of scorecard?.scorecardGroups || []) {
+    for (const section of group?.sections || []) {
+      for (const question of section?.questions || []) {
         if (question && question.id !== undefined) questions.push(question);
       }
     }
@@ -596,6 +949,7 @@ async function stepProcessSubmissions(
   log.info('Scorecard fetched', { questionCount: questions.length });
 
   const createdRecords: SubmissionRecord[] = [];
+  let nextSubmissionIndex = 1;
 
   const createSubmission = async (index: number, handleOverride?: string) => {
     const handle = handleOverride ?? pickSubmitter(cfg.submitters, index);
@@ -603,16 +957,18 @@ async function stepProcessSubmissions(
     log.info('REQ getMemberByHandle', { handle });
     const member = await TC.getMemberByHandle(token, handle);
     cancel.check();
+    const upload = await uploadSubmissionArtifact(log, artifact);
+    cancel.check();
     const payload = {
       challengeId,
       memberId: String(member.userId),
       type: 'CONTEST_SUBMISSION',
-      url: `https://example.com/f2f-submission-${handle}-${index}.zip`
+      url: upload.url
     };
-    log.info('REQ createSubmission', payload);
+    log.info('REQ createSubmission', { ...payload, storageKey: upload.key, index });
     const submission = await TC.createSubmission(token, payload);
     cancel.check();
-    log.info('RES createSubmission', { id: submission.id, handle });
+    log.info('RES createSubmission', { id: submission.id, handle, storageKey: upload.key });
     submissionsByHandle[handle] = submissionsByHandle[handle] || [];
     submissionsByHandle[handle].push(String(submission.id));
     writeLastRun({ submissions: submissionsByHandle });
@@ -626,14 +982,29 @@ async function stepProcessSubmissions(
     return record;
   };
 
-  const completeReview = async (record: SubmissionRecord, outcome: ReviewOutcome) => {
+  const queueSubmission = async (handleOverride?: string) => {
+    const record = await createSubmission(nextSubmissionIndex, handleOverride);
+    nextSubmissionIndex += 1;
+    return record;
+  };
+
+  const completeReview = async (step: StepName, record: SubmissionRecord, outcome: ReviewOutcome) => {
     cancel.check();
-    await ensureIterativePhaseState(log, token, challengeId, true, cancel);
+    await ensureIterativePhaseState(log, token, challengeId, true, cancel, step);
     let attempts = 0;
     let pendingReview: any | undefined;
     while (!pendingReview && attempts < 12) {
       cancel.check();
-      pendingReview = await findPendingReview(token, challengeId, record.id, reviewer.resourceId);
+      let phaseHints: string[] = [];
+      try {
+        const currentChallenge = await TC.getChallenge(token, challengeId);
+        phaseHints = extractOpenIterativePhaseIds(currentChallenge);
+      } catch (error: any) {
+        const message = error?.message || String(error);
+        log.warn('Failed to refresh challenge while locating pending iterative review; will retry', { step, attempt: attempts + 1, error: message });
+      }
+
+      pendingReview = await findPendingReview(token, challengeId, record.id, reviewer.resourceId, phaseHints);
       if (pendingReview) break;
       await cancel.wait(5000);
       attempts += 1;
@@ -661,47 +1032,119 @@ async function stepProcessSubmissions(
     log.info('REQ updateReview', { reviewId: pendingReview.id, outcome, submissionId: record.id });
     await TC.updateReview(token, String(pendingReview.id), payload);
     cancel.check();
-    log.info('Review completed', { submissionId: record.id, outcome });
+    log.info('Review completed', { submissionId: record.id, outcome }, getStepProgress(step));
     const key = `${reviewer.handle}:${record.handle}:${record.id}`;
     reviewsByKey[key] = String(pendingReview.id);
     writeLastRun({ reviews: reviewsByKey });
     if (outcome === 'fail') {
-      await ensureIterativePhaseState(log, token, challengeId, false, cancel);
+      await awaitIterativeTransition(log, token, challengeId, record.id, reviewer.resourceId, cancel, step);
     }
   };
 
-  // Submission 1 - fail
-  const submission1 = await createSubmission(1);
-  await completeReview(submission1, 'fail');
+  return {
+    queueSubmission,
+    completeReview,
+    ensureIterativePhase: (expectOpen, step) => ensureIterativePhaseState(log, token, challengeId, expectOpen, cancel, step),
+    getCreatedRecords: () => [...createdRecords],
+    submitterHandles: [...cfg.submitters]
+  };
+}
 
-  // Submission 2 - fail, create submission 3 while review pending
-  const submission2 = await createSubmission(2);
-  await ensureIterativePhaseState(log, token, challengeId, true, cancel);
-  const submission3Promise = createSubmission(3);
-  await completeReview(submission2, 'fail');
-  const submission3 = await submission3Promise;
-  await completeReview(submission3, 'fail');
+async function stepLoadInitialSubmissions(
+  log: RunnerLogger,
+  token: string,
+  cfg: First2FinishConfig,
+  challengeId: string,
+  reviewer: ReviewerAssignment,
+  cancel: CancellationHelpers
+): Promise<SubmissionFlowState> {
+  const helpers = await prepareSubmissionHelpers(log, token, cfg, challengeId, reviewer, cancel);
+  const submitterHandles = helpers.submitterHandles;
+  if (!submitterHandles.length) {
+    throw new Error('First2Finish flow requires at least one submitter handle');
+  }
 
-  // Submission 4 - fail
-  const submission4 = await createSubmission(4);
-  await completeReview(submission4, 'fail');
+  const initialBatch: SubmissionRecord[] = [];
+  log.info('Creating initial submission batch for iterative queue', {
+    perSubmitter: INITIAL_SUBMISSIONS_PER_SUBMITTER,
+    submitters: submitterHandles,
+    delayMs: INITIAL_SUBMISSION_DELAY_MS
+  });
 
-  // Submission 5 - pass
-  const submission5 = await createSubmission(5);
-  // Create a sixth submission while the final review is pending to confirm autopilot behaviour
-  const submission6 = await createSubmission(6);
-  await completeReview(submission5, 'pass');
-  log.info('Sixth submission queued after winning submission', { submissionId: submission6.id, handle: submission6.handle });
+  for (let round = 0; round < INITIAL_SUBMISSIONS_PER_SUBMITTER; round += 1) {
+    for (let idx = 0; idx < submitterHandles.length; idx += 1) {
+      cancel.check();
+      const handle = submitterHandles[idx];
+      const record = await helpers.queueSubmission(handle);
+      log.info('Initial submission queued', {
+        submissionId: record.id,
+        handle: record.handle,
+        round: round + 1,
+        position: record.index
+      });
+      initialBatch.push(record);
+      const isLast = round === INITIAL_SUBMISSIONS_PER_SUBMITTER - 1 && idx === submitterHandles.length - 1;
+      if (!isLast) {
+        await cancel.wait(INITIAL_SUBMISSION_DELAY_MS);
+      }
+    }
+  }
 
-  log.info('Iterative submission process completed', {
-    created: createdRecords.length,
-    failures: Math.min(createdRecords.length, FAIL_COUNT),
-    passIndex: PASS_INDEX
-  }, getStepProgress('processSubmissions'));
+  log.info('Initial submission batch created', { count: initialBatch.length }, getStepProgress('loadInitialSubmissions'));
 
   return {
-    winningSubmission: submission5,
-    submissionRecords: createdRecords
+    helpers,
+    initialBatch
+  };
+}
+
+async function stepProcessReviews(
+  log: RunnerLogger,
+  state: SubmissionFlowState,
+  cancel: CancellationHelpers
+): Promise<SubmissionFlowState> {
+  const { helpers, initialBatch } = state;
+  for (const record of initialBatch) {
+    cancel.check();
+    log.info('Processing initial submission with failing review', { submissionId: record.id, handle: record.handle });
+    await helpers.completeReview('processReviews', record, 'fail');
+  }
+
+  await helpers.ensureIterativePhase(false, 'processReviews');
+  log.info('Initial failing reviews completed; iterative review phase closed', { processed: initialBatch.length }, getStepProgress('processReviews'));
+
+  return state;
+}
+
+async function stepFinalizeSubmission(
+  log: RunnerLogger,
+  state: SubmissionFlowState,
+  cancel: CancellationHelpers
+) {
+  const { helpers, initialBatch } = state;
+  const submitterHandles = helpers.submitterHandles;
+  if (!submitterHandles.length) {
+    throw new Error('First2Finish flow requires at least one submitter handle');
+  }
+
+  cancel.check();
+  await cancel.wait(INITIAL_SUBMISSION_DELAY_MS);
+  const finalHandle = submitterHandles[0];
+  log.info('Creating final submission for passing review', { handle: finalHandle });
+  const winningSubmission = await helpers.queueSubmission(finalHandle);
+  await helpers.completeReview('finalSubmission', winningSubmission, 'pass');
+
+  const submissionRecords = helpers.getCreatedRecords();
+  log.info('Iterative submission process completed', {
+    totalCreated: submissionRecords.length,
+    initialFailures: initialBatch.length,
+    winningSubmissionId: winningSubmission.id,
+    winningHandle: winningSubmission.handle
+  }, getStepProgress('finalSubmission'));
+
+  return {
+    winningSubmission,
+    submissionRecords
   };
 }
 
@@ -710,15 +1153,16 @@ async function stepAwaitWinner(
   token: string,
   challengeId: string,
   winningHandle: string,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  submissionPhaseName: string
 ) {
-  log.info('Waiting for submission phase to close and winner assignment...');
+  log.info(`Waiting for ${submissionPhaseName} phase to close and winner assignment...`);
   while (true) {
     cancel.check();
     const challenge = await TC.getChallenge(token, challengeId);
     logChallengeSnapshot(log, 'awaitWinner', challenge);
     const phases = Array.isArray(challenge?.phases) ? challenge.phases : [];
-    const submissionPhase = phases.find((p: any) => p?.name === 'Submission');
+    const submissionPhase = phases.find((p: any) => p?.name === submissionPhaseName);
     const iterativePhaseOpen = phases.some((p: any) => p?.name === 'Iterative Review' && p.isOpen);
     const winnerHandles = Array.isArray(challenge?.winners)
       ? challenge.winners.map((w: any) => w?.handle).filter(Boolean)
@@ -726,7 +1170,7 @@ async function stepAwaitWinner(
     const submissionClosed = submissionPhase ? submissionPhase.isOpen === false : false;
     const winnerAssigned = winnerHandles.includes(winningHandle);
     if (submissionClosed && winnerAssigned && !iterativePhaseOpen) {
-      log.info('Winner assigned and submission phase closed', { winner: winningHandle }, getStepProgress('awaitWinner'));
+      log.info('Winner assigned and submission phase closed', { winner: winningHandle, submissionPhaseName }, getStepProgress('awaitWinner'));
       return challenge;
     }
     await cancel.wait(5000);
@@ -738,12 +1182,15 @@ export async function runFirst2FinishFlow(
   mode: RunMode,
   toStep: StepName | undefined,
   log: RunnerLogger,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: { submissionPhaseName?: string }
 ) {
   const { writeLastRun, resetLastRun } = await import('../utils/lastRun.js');
   const cancel = createCancellationHelpers(signal, log);
   resetLastRun();
   initializeStepStatuses(log);
+
+  const submissionPhaseName = options?.submissionPhaseName ?? 'Submission';
 
   cancel.check();
   maybeStop(mode, toStep, 'token', log);
@@ -756,23 +1203,29 @@ export async function runFirst2FinishFlow(
 
   cancel.check();
   maybeStop(mode, toStep, 'createChallenge', log);
-  await withStep(log, 'updateDraft', () => stepUpdateDraft(log, token, cfg, challenge.id, cancel));
+  await withStep(log, 'updateDraft', () => stepUpdateDraft(log, token, cfg, challenge.id, cancel, submissionPhaseName));
 
   maybeStop(mode, toStep, 'updateDraft', log);
   cancel.check();
   await withStep(log, 'activate', () => stepActivate(log, token, challenge.id, cancel));
 
   maybeStop(mode, toStep, 'activate', log);
-  await withStep(log, 'awaitRegSubOpen', () => stepAwaitPhasesOpen(log, token, challenge.id, ['Registration', 'Submission'], 'awaitRegSubOpen', [], cancel));
+  await withStep(log, 'awaitRegSubOpen', () => stepAwaitPhasesOpen(log, token, challenge.id, ['Registration', submissionPhaseName], 'awaitRegSubOpen', [], cancel));
 
   maybeStop(mode, toStep, 'awaitRegSubOpen', log);
   const reviewer = await withStep(log, 'assignResources', () => stepAssignResources(log, token, cfg, challenge.id, cancel));
 
   maybeStop(mode, toStep, 'assignResources', log);
-  const processResult = await withStep(log, 'processSubmissions', () => stepProcessSubmissions(log, token, cfg, challenge.id, reviewer, cancel));
+  const submissionState = await withStep(log, 'loadInitialSubmissions', () => stepLoadInitialSubmissions(log, token, cfg, challenge.id, reviewer, cancel));
 
-  maybeStop(mode, toStep, 'processSubmissions', log);
-  await withStep(log, 'awaitWinner', () => stepAwaitWinner(log, token, challenge.id, processResult.winningSubmission.handle, cancel));
+  maybeStop(mode, toStep, 'loadInitialSubmissions', log);
+  const reviewState = await withStep(log, 'processReviews', () => stepProcessReviews(log, submissionState, cancel));
+
+  maybeStop(mode, toStep, 'processReviews', log);
+  const processResult = await withStep(log, 'finalSubmission', () => stepFinalizeSubmission(log, reviewState, cancel));
+
+  maybeStop(mode, toStep, 'finalSubmission', log);
+  await withStep(log, 'awaitWinner', () => stepAwaitWinner(log, token, challenge.id, processResult.winningSubmission.handle, cancel, submissionPhaseName));
 
   log.info('First2Finish flow complete', { challengeId: challenge.id }, 100);
 }

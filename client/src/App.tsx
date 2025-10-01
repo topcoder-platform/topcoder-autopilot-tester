@@ -19,7 +19,16 @@ const initialToStepState = ORDERED_FLOW_KEYS.reduce<Record<FlowVariant, string>>
 }, {} as Record<FlowVariant, string>)
 
 function getFlowConfig(config: AppConfig, flow: FlowVariant) {
-  return flow === 'full' ? config.fullChallenge : config.first2finish
+  switch (flow) {
+    case 'full':
+      return config.fullChallenge
+    case 'first2finish':
+      return config.first2finish
+    case 'topgear':
+      return config.topgear
+    default:
+      return config.fullChallenge
+  }
 }
 
 export default function App() {
@@ -48,9 +57,15 @@ export default function App() {
   useEffect(() => {
     const root = document.documentElement
     if (!root) return
-    const isFirst2FinishActive = activeFlow === 'first2finish'
-    const primary = isFirst2FinishActive ? '#047857' : '#2563eb'
-    const primaryStrong = isFirst2FinishActive ? '#065f46' : '#1d4ed8'
+    let primary = '#2563eb'
+    let primaryStrong = '#1d4ed8'
+    if (activeFlow === 'first2finish') {
+      primary = '#047857'
+      primaryStrong = '#065f46'
+    } else if (activeFlow === 'topgear') {
+      primary = '#7c3aed'
+      primaryStrong = '#5b21b6'
+    }
     root.style.setProperty('--primary-color', primary)
     root.style.setProperty('--primary-color-strong', primaryStrong)
     return () => {
@@ -94,24 +109,33 @@ export default function App() {
           {ORDERED_FLOW_KEYS.map(flowKey => {
             const definition = FLOW_DEFINITIONS[flowKey]
             const isActive = flowKey === activeFlow
-            const isFirst2Finish = flowKey === 'first2finish'
-            const palette = isFirst2Finish
-              ? {
-                  activeBackground: '#047857',
-                  inactiveBackground: '#064e3b',
-                  activeBorder: '#065f46',
-                  inactiveBorder: '#065f46',
-                  activeColor: '#f8fafc',
-                  inactiveColor: '#bbf7d0'
-                }
-              : {
-                  activeBackground: '#1d4ed8',
-                  inactiveBackground: '#1e293b',
-                  activeBorder: '#1f2937',
-                  inactiveBorder: '#1f2937',
-                  activeColor: '#f8fafc',
-                  inactiveColor: '#cbd5f5'
-                }
+            let palette = {
+              activeBackground: '#1d4ed8',
+              inactiveBackground: '#1e293b',
+              activeBorder: '#1f2937',
+              inactiveBorder: '#1f2937',
+              activeColor: '#f8fafc',
+              inactiveColor: '#cbd5f5'
+            }
+            if (flowKey === 'first2finish') {
+              palette = {
+                activeBackground: '#047857',
+                inactiveBackground: '#064e3b',
+                activeBorder: '#065f46',
+                inactiveBorder: '#065f46',
+                activeColor: '#f8fafc',
+                inactiveColor: '#bbf7d0'
+              }
+            } else if (flowKey === 'topgear') {
+              palette = {
+                activeBackground: '#7c3aed',
+                inactiveBackground: '#3b0764',
+                activeBorder: '#5b21b6',
+                inactiveBorder: '#5b21b6',
+                activeColor: '#f8fafc',
+                inactiveColor: '#d8b4fe'
+              }
+            }
             return (
               <button
                 type="button"

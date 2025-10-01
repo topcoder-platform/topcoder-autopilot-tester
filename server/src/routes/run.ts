@@ -24,7 +24,11 @@ router.get('/stream', async (req, res) => {
   const mode = modeParam === 'toStep' ? 'toStep' : 'full';
   const toStepRaw = typeof req.query.toStep === 'string' ? req.query.toStep : undefined;
   const flowParam = typeof req.query.flow === 'string' ? req.query.flow.toLowerCase() : 'full';
-  const flowVariant = flowParam === 'first2finish' ? 'first2finish' : 'full';
+  const flowVariant = flowParam === 'first2finish'
+    ? 'first2finish'
+    : flowParam === 'topgear'
+      ? 'topgear'
+      : 'full';
 
   // Cancel any previously running flow before starting a new one.
   if (activeRun) {
@@ -65,13 +69,14 @@ router.get('/stream', async (req, res) => {
 
   try {
     send({ level: 'info', message: 'Run started', data: { flow: flowVariant } });
-    if (flowVariant === 'first2finish') {
+    if (flowVariant === 'first2finish' || flowVariant === 'topgear') {
       await runFirst2FinishFlow(
-        appConfig.first2finish,
+        flowVariant === 'first2finish' ? appConfig.first2finish : appConfig.topgear,
         mode,
         toStepRaw as First2FinishStepName | undefined,
         log,
-        controller.signal
+        controller.signal,
+        flowVariant === 'topgear' ? { submissionPhaseName: 'Topgear Submission' } : undefined
       );
     } else {
       await runFlow(
