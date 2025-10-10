@@ -9,6 +9,7 @@ export type FlowConfig = {
   challengeTrackId: string;
   timelineTemplateId: string;
   copilotHandle: string;
+  screener?: string;
   reviewers: string[];
   submitters: string[];
   submissionsPerSubmitter: number;
@@ -33,10 +34,38 @@ export type First2FinishConfig = {
 
 export type TopgearConfig = First2FinishConfig;
 
+export type DesignConfig = {
+  challengeNamePrefix: string;
+  projectId: number;
+  challengeTypeId: string;
+  challengeTrackId: string;
+  timelineTemplateId: string;
+  copilotHandle: string;
+  // Reviewer handles by phase/role
+  reviewer: string; // Review phase -> role "Reviewer"
+  screener?: string; // Screening -> role "Screener"
+  screeningReviewer?: string; // Legacy alias for screener
+  approver?: string; // Approval -> role "Approver"
+  checkpointScreener?: string; // Checkpoint Screening -> role "Checkpoint Screener"
+  checkpointReviewer?: string; // Checkpoint Review -> role "Checkpoint Reviewer"
+  submitters: string[];
+  submissionsPerSubmitter: number;
+  scorecardId: string; // Used for Screening/Review/Approval unless specialized
+  reviewScorecardId?: string;
+  screeningScorecardId?: string;
+  approvalScorecardId?: string;
+  checkpointScorecardId: string; // legacy fallback for checkpoint phases
+  checkpointScreeningScorecardId?: string;
+  checkpointReviewScorecardId?: string;
+  prizes: PrizeTuple;
+  submissionZipPath: string;
+};
+
 export type AppConfig = {
   fullChallenge: FlowConfig;
   first2finish: First2FinishConfig;
   topgear: TopgearConfig;
+  designChallenge: DesignConfig;
 };
 
 export const FIRST2FINISH_TIMELINE_TEMPLATE_ID = '0a0fed34-cb5a-47f5-b0cb-6e2ee7de8dcb';
@@ -49,6 +78,7 @@ export const DEFAULT_FLOW_CONFIG: FlowConfig = {
   challengeTrackId: '9b6fc876-f4d9-4ccb-9dfd-419247628825',
   timelineTemplateId: 'a5a15ac0-aef4-41bb-97c0-a9d5192eae42',
   copilotHandle: 'TCConnCopilot',
+  screener: 'marioskranitsas',
   reviewers: ['liuliquan', 'marioskranitsas'],
   submitters: ['devtest140'],
   submissionsPerSubmitter: 1,
@@ -79,9 +109,30 @@ export const DEFAULT_TOPGEAR_CONFIG: TopgearConfig = {
   timelineTemplateId: TOPGEAR_TIMELINE_TEMPLATE_ID,
   copilotHandle: 'TCConnCopilot',
   reviewer: 'marioskranitsas',
-  submitters: ['devtest140', 'devtest141'],
+  submitters: ['devtest140'],
   scorecardId: 'hFU73Ve2XlYCK-',
   prize: 500,
+  submissionZipPath: './artifacts/sample-submission.zip'
+};
+
+export const DEFAULT_DESIGN_CONFIG: DesignConfig = {
+  challengeNamePrefix: 'Autopilot Design - ',
+  projectId: 100439,
+  challengeTypeId: '927abff4-7af9-4145-8ba1-577c16e64e2e',
+  challengeTrackId: '9b6fc876-f4d9-4ccb-9dfd-419247628825',
+  timelineTemplateId: 'a5a15ac0-aef4-41bb-97c0-a9d5192eae42',
+  copilotHandle: 'TCConnCopilot',
+  reviewer: 'marioskranitsas',
+  screener: 'marioskranitsas',
+  screeningReviewer: 'marioskranitsas',
+  approver: 'marioskranitsas',
+  checkpointScreener: 'marioskranitsas',
+  checkpointReviewer: 'marioskranitsas',
+  submitters: ['devtest140'],
+  submissionsPerSubmitter: 1,
+  scorecardId: 'jEChE8UnLAxHTD',
+  checkpointScorecardId: 'jEChE8UnLAxHTD',
+  prizes: [500, 200, 100],
   submissionZipPath: './artifacts/sample-submission.zip'
 };
 
@@ -188,6 +239,7 @@ export function normalizeFlowConfig(value: unknown): FlowConfig {
     challengeTrackId: ensureString(base.challengeTrackId, fallback.challengeTrackId),
     timelineTemplateId: ensureString(base.timelineTemplateId, fallback.timelineTemplateId),
     copilotHandle: ensureString(base.copilotHandle, fallback.copilotHandle),
+    screener: ensureString((base as any).screener ?? '', fallback.screener ?? fallback.reviewers[0] ?? fallback.copilotHandle),
     reviewers: ensureStringArray(base.reviewers, fallback.reviewers),
     submitters: ensureStringArray(base.submitters, fallback.submitters),
     submissionsPerSubmitter: ensureNumber(base.submissionsPerSubmitter, fallback.submissionsPerSubmitter),
@@ -202,7 +254,57 @@ export function normalizeFirst2FinishConfig(value: unknown): First2FinishConfig 
 }
 
 export function normalizeTopgearConfig(value: unknown): TopgearConfig {
-  return normalizeIterativeConfig(value, DEFAULT_TOPGEAR_CONFIG, TOPGEAR_TIMELINE_TEMPLATE_ID);
+  // For Topgear flows we support a single submitter handle.
+  // Use minSubmitters = 1 so a one-item list is honored.
+  return normalizeIterativeConfig(value, DEFAULT_TOPGEAR_CONFIG, TOPGEAR_TIMELINE_TEMPLATE_ID, 1);
+}
+
+export function normalizeDesignConfig(value: unknown): DesignConfig {
+  const base = typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+  const fallback = DEFAULT_DESIGN_CONFIG;
+  const defaultScorecard = ensureString(base.scorecardId, fallback.scorecardId);
+  const reviewScorecard = ensureString((base as any).reviewScorecardId ?? base.scorecardId, defaultScorecard);
+  const screeningScorecard = ensureString((base as any).screeningScorecardId ?? base.scorecardId, defaultScorecard);
+  const approvalScorecard = ensureString((base as any).approvalScorecardId ?? base.scorecardId, defaultScorecard);
+  const checkpointBase = ensureString((base as any).checkpointScorecardId, fallback.checkpointScorecardId);
+  const checkpointScreeningScorecard = ensureString((base as any).checkpointScreeningScorecardId ?? (base as any).checkpointScorecardId, checkpointBase);
+  const checkpointReviewScorecard = ensureString((base as any).checkpointReviewScorecardId ?? (base as any).checkpointScorecardId, checkpointBase);
+  const reviewer = ensureString(base.reviewer, fallback.reviewer);
+  const screener = ensureString(
+    (base as any).screener ?? (base as any).screeningReviewer ?? reviewer,
+    fallback.screener ?? fallback.screeningReviewer ?? reviewer
+  );
+  const approver = ensureString((base as any).approver ?? reviewer, fallback.approver ?? reviewer);
+  const checkpointScreener = ensureString(
+    (base as any).checkpointScreener ?? (base as any).screener ?? (base as any).screeningReviewer ?? reviewer,
+    fallback.checkpointScreener ?? screener
+  );
+  const checkpointReviewer = ensureString((base as any).checkpointReviewer ?? reviewer, fallback.checkpointReviewer ?? reviewer);
+  return {
+    challengeNamePrefix: ensureString(base.challengeNamePrefix, fallback.challengeNamePrefix),
+    projectId: ensureNumber(base.projectId, fallback.projectId),
+    challengeTypeId: ensureString(base.challengeTypeId, fallback.challengeTypeId),
+    challengeTrackId: ensureString(base.challengeTrackId, fallback.challengeTrackId),
+    timelineTemplateId: ensureString(base.timelineTemplateId, fallback.timelineTemplateId),
+    copilotHandle: ensureString(base.copilotHandle, fallback.copilotHandle),
+    reviewer,
+    screener,
+    screeningReviewer: screener,
+    approver,
+    checkpointScreener,
+    checkpointReviewer,
+    submitters: ensureStringArray(base.submitters, fallback.submitters),
+    submissionsPerSubmitter: ensureNumber(base.submissionsPerSubmitter, fallback.submissionsPerSubmitter),
+    scorecardId: defaultScorecard,
+    reviewScorecardId: reviewScorecard,
+    screeningScorecardId: screeningScorecard,
+    approvalScorecardId: approvalScorecard,
+    checkpointScorecardId: checkpointBase,
+    checkpointScreeningScorecardId: checkpointScreeningScorecard,
+    checkpointReviewScorecardId: checkpointReviewScorecard,
+    prizes: ensurePrizeTuple(base.prizes, fallback.prizes),
+    submissionZipPath: ensureString(base.submissionZipPath, fallback.submissionZipPath)
+  };
 }
 
 export function normalizeAppConfig(raw: unknown): AppConfig {
@@ -210,12 +312,13 @@ export function normalizeAppConfig(raw: unknown): AppConfig {
     return {
       fullChallenge: DEFAULT_FLOW_CONFIG,
       first2finish: DEFAULT_FIRST2FINISH_CONFIG,
-      topgear: DEFAULT_TOPGEAR_CONFIG
+      topgear: DEFAULT_TOPGEAR_CONFIG,
+      designChallenge: DEFAULT_DESIGN_CONFIG
     };
   }
 
   const data = raw as Record<string, unknown>;
-  const hasNewStructure = ['fullChallenge', 'first2finish', 'topgear'].some(key => Object.prototype.hasOwnProperty.call(data, key));
+  const hasNewStructure = ['fullChallenge', 'first2finish', 'topgear', 'designChallenge'].some(key => Object.prototype.hasOwnProperty.call(data, key));
 
   if (!hasNewStructure) {
     const flowConfig = normalizeFlowConfig(data);
@@ -232,13 +335,20 @@ export function normalizeAppConfig(raw: unknown): AppConfig {
       timelineTemplateId: TOPGEAR_TIMELINE_TEMPLATE_ID,
       submitters: ensureStringArray((data as any).submitters, DEFAULT_TOPGEAR_CONFIG.submitters)
     });
-    return { fullChallenge: flowConfig, first2finish: f2f, topgear };
+    const designChallenge = normalizeDesignConfig({
+      ...data,
+      reviewer,
+      submissionsPerSubmitter: ensureNumber((data as any).submissionsPerSubmitter, DEFAULT_DESIGN_CONFIG.submissionsPerSubmitter),
+      checkpointScorecardId: ensureString((data as any).checkpointScorecardId, DEFAULT_DESIGN_CONFIG.checkpointScorecardId)
+    });
+    return { fullChallenge: flowConfig, first2finish: f2f, topgear, designChallenge };
   }
 
   const full = normalizeFlowConfig(data.fullChallenge);
   const f2f = normalizeFirst2FinishConfig(data.first2finish);
   const topgear = normalizeTopgearConfig(data.topgear);
-  return { fullChallenge: full, first2finish: f2f, topgear };
+  const designChallenge = normalizeDesignConfig((data as any).designChallenge);
+  return { fullChallenge: full, first2finish: f2f, topgear, designChallenge };
 }
 
 export function readAppConfigFile(filePath: string): AppConfig {
@@ -247,7 +357,8 @@ export function readAppConfigFile(filePath: string): AppConfig {
       return {
         fullChallenge: DEFAULT_FLOW_CONFIG,
         first2finish: DEFAULT_FIRST2FINISH_CONFIG,
-        topgear: DEFAULT_TOPGEAR_CONFIG
+        topgear: DEFAULT_TOPGEAR_CONFIG,
+        designChallenge: DEFAULT_DESIGN_CONFIG
       };
     }
     const rawFile = fs.readFileSync(filePath, 'utf-8');
@@ -258,7 +369,8 @@ export function readAppConfigFile(filePath: string): AppConfig {
     return {
       fullChallenge: DEFAULT_FLOW_CONFIG,
       first2finish: DEFAULT_FIRST2FINISH_CONFIG,
-      topgear: DEFAULT_TOPGEAR_CONFIG
+      topgear: DEFAULT_TOPGEAR_CONFIG,
+      designChallenge: DEFAULT_DESIGN_CONFIG
     };
   }
 }
@@ -267,7 +379,8 @@ export function writeAppConfigFile(filePath: string, config: AppConfig) {
   const finalConfig: AppConfig = {
     fullChallenge: normalizeFlowConfig(config.fullChallenge),
     first2finish: normalizeFirst2FinishConfig(config.first2finish),
-    topgear: normalizeTopgearConfig(config.topgear)
+    topgear: normalizeTopgearConfig(config.topgear),
+    designChallenge: normalizeDesignConfig(config.designChallenge)
   };
   fs.writeFileSync(filePath, JSON.stringify(finalConfig, null, 2));
 }

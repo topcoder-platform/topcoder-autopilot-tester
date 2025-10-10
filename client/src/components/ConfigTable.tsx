@@ -1,10 +1,10 @@
 
 import React from 'react'
-import type { First2FinishConfig, FlowVariant, FullChallengeConfig, TopgearConfig } from '../types'
+import type { First2FinishConfig, FlowVariant, FullChallengeConfig, TopgearConfig, DesignConfig } from '../types'
 
 type Props = {
   flow: FlowVariant;
-  config: FullChallengeConfig | First2FinishConfig;
+  config: FullChallengeConfig | First2FinishConfig | DesignConfig;
 };
 
 function buildFullEntries(config: FullChallengeConfig) {
@@ -15,6 +15,7 @@ function buildFullEntries(config: FullChallengeConfig) {
     { label: 'Challenge Track ID', value: config.challengeTrackId ?? '-' },
     { label: 'Timeline Template ID', value: config.timelineTemplateId ?? '-' },
     { label: 'Copilot handle', value: config.copilotHandle?.trim() || '-' },
+    { label: 'Screener handle', value: (config.screener || '').trim() || '-' },
     {
       label: 'Reviewers',
       value: Array.isArray(config.reviewers) && config.reviewers.length
@@ -71,10 +72,42 @@ function buildIterativeEntries(config: First2FinishConfig | TopgearConfig) {
   ];
 }
 
+function buildDesignEntries(config: DesignConfig) {
+  return [
+    { label: 'Challenge name prefix', value: config.challengeNamePrefix?.trim() || '-' },
+    { label: 'Project ID', value: config.projectId ?? '-' },
+    { label: 'Challenge Type ID', value: config.challengeTypeId ?? '-' },
+    { label: 'Challenge Track ID', value: config.challengeTrackId ?? '-' },
+    { label: 'Timeline Template ID', value: config.timelineTemplateId ?? '-' },
+    { label: 'Copilot handle', value: config.copilotHandle?.trim() || '-' },
+    { label: 'Reviewer', value: config.reviewer?.trim() || '-' },
+    { label: 'Screener', value: (config.screener || config.screeningReviewer || config.reviewer || '').trim() || '-' },
+    { label: 'Approver', value: (config.approver || config.reviewer || '').trim() || '-' },
+    { label: 'Checkpoint Screener', value: (config.checkpointScreener || config.screener || config.screeningReviewer || config.reviewer || '').trim() || '-' },
+    { label: 'Checkpoint Reviewer', value: (config.checkpointReviewer || config.reviewer || '').trim() || '-' },
+    {
+      label: 'Submitters',
+      value: Array.isArray(config.submitters) && config.submitters.length
+        ? config.submitters.join(', ')
+        : '-'
+    },
+    { label: 'Submissions per submitter', value: config.submissionsPerSubmitter ?? '-' },
+    { label: 'Review Scorecard ID', value: (config.reviewScorecardId || config.scorecardId) ?? '-' },
+    { label: 'Screening Scorecard ID', value: (config.screeningScorecardId || config.scorecardId) ?? '-' },
+    { label: 'Approval Scorecard ID', value: (config.approvalScorecardId || config.scorecardId) ?? '-' },
+    { label: 'Checkpoint Screening Scorecard ID', value: (config.checkpointScreeningScorecardId || config.checkpointScorecardId) ?? '-' },
+    { label: 'Checkpoint Review Scorecard ID', value: (config.checkpointReviewScorecardId || config.checkpointScorecardId) ?? '-' },
+    { label: 'Prizes', value: Array.isArray(config.prizes) && config.prizes.length ? config.prizes.join(', ') : '-' },
+    { label: 'Submission zip path', value: config.submissionZipPath?.trim() || '-' }
+  ];
+}
+
 export default function ConfigTable({ flow, config }: Props) {
   const entries = flow === 'full'
     ? buildFullEntries(config as FullChallengeConfig)
-    : buildIterativeEntries(config as First2FinishConfig | TopgearConfig);
+    : flow === 'design'
+      ? buildDesignEntries(config as DesignConfig)
+      : buildIterativeEntries(config as First2FinishConfig | TopgearConfig);
 
   return (
     <div className="card">

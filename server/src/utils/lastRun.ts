@@ -22,7 +22,9 @@ export type LastRun = {
   reviews?: { [key: string]: string }; // `${reviewerHandle}:${submitterHandle}:${submissionId}` -> reviewId
   appeals?: string[]; // appeal ids
   appealedCommentIds?: string[];
-  reviewerResources?: { [handle: string]: string }; // reviewer handle -> resource id
+  reviewerResources?: { [handle: string]: string }; // DEPRECATED: reviewer handle -> resource id (single role). Kept for backward-compat.
+  // New: map resource IDs per handle and role to avoid collisions when the same member holds multiple roles
+  reviewerResourcesByHandle?: { [handle: string]: { [roleName: string]: string } };
   challengeResources?: ChallengeResource[]; // resources fetched from challenge API
   resourceRoleIds?: { [roleName: string]: string }; // cached resource role IDs by name
 };

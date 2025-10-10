@@ -22,6 +22,8 @@ function getFlowConfig(config: AppConfig, flow: FlowVariant) {
   switch (flow) {
     case 'full':
       return config.fullChallenge
+    case 'design':
+      return config.designChallenge
     case 'first2finish':
       return config.first2finish
     case 'topgear':
@@ -65,6 +67,12 @@ export default function App() {
     } else if (activeFlow === 'topgear') {
       primary = '#7c3aed'
       primaryStrong = '#5b21b6'
+    } else if (activeFlow === 'topgearLate') {
+      primary = '#dc2626'
+      primaryStrong = '#b91c1c'
+    } else if (activeFlow === 'design') {
+      primary = '#ea580c'
+      primaryStrong = '#c2410c'
     }
     root.style.setProperty('--primary-color', primary)
     root.style.setProperty('--primary-color-strong', primaryStrong)
@@ -134,6 +142,24 @@ export default function App() {
                 inactiveBorder: '#5b21b6',
                 activeColor: '#f8fafc',
                 inactiveColor: '#d8b4fe'
+              }
+            } else if (flowKey === 'topgearLate') {
+              palette = {
+                activeBackground: '#dc2626',
+                inactiveBackground: '#7f1d1d',
+                activeBorder: '#b91c1c',
+                inactiveBorder: '#b91c1c',
+                activeColor: '#f8fafc',
+                inactiveColor: '#fecaca'
+              }
+            } else if (flowKey === 'design') {
+              palette = {
+                activeBackground: '#ea580c',
+                inactiveBackground: '#7c2d12',
+                activeBorder: '#c2410c',
+                inactiveBorder: '#c2410c',
+                activeColor: '#f8fafc',
+                inactiveColor: '#fed7aa'
               }
             }
             return (

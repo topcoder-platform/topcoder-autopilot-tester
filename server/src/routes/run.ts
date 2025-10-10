@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { RunnerLogger } from '../utils/logger.js';
 import { runFlow, type StepName as FullStepName } from '../services/flowRunner.js';
 import { runFirst2FinishFlow, type StepName as First2FinishStepName } from '../services/first2finishRunner.js';
+import { runDesignFlow, type StepName as DesignStepName } from '../services/designRunner.js';
 import { readAppConfigFile } from '../types/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -28,7 +29,11 @@ router.get('/stream', async (req, res) => {
     ? 'first2finish'
     : flowParam === 'topgear'
       ? 'topgear'
-      : 'full';
+      : flowParam === 'topgearlate'
+        ? 'topgearLate'
+        : flowParam === 'design'
+          ? 'design'
+          : 'full';
 
   // Cancel any previously running flow before starting a new one.
   if (activeRun) {
@@ -69,14 +74,26 @@ router.get('/stream', async (req, res) => {
 
   try {
     send({ level: 'info', message: 'Run started', data: { flow: flowVariant } });
-    if (flowVariant === 'first2finish' || flowVariant === 'topgear') {
+    if (flowVariant === 'first2finish' || flowVariant === 'topgear' || flowVariant === 'topgearLate') {
       await runFirst2FinishFlow(
         flowVariant === 'first2finish' ? appConfig.first2finish : appConfig.topgear,
         mode,
         toStepRaw as First2FinishStepName | undefined,
         log,
         controller.signal,
-        flowVariant === 'topgear' ? { submissionPhaseName: 'Topgear Submission' } : undefined
+        flowVariant === 'topgear'
+          ? { submissionPhaseName: 'Topgear Submission' }
+          : flowVariant === 'topgearLate'
+            ? { submissionPhaseName: 'Topgear Submission', lateSubmission: true }
+            : undefined
+      );
+    } else if (flowVariant === 'design') {
+      await runDesignFlow(
+        appConfig.designChallenge,
+        mode,
+        toStepRaw as DesignStepName | undefined,
+        log,
+        controller.signal
       );
     } else {
       await runFlow(

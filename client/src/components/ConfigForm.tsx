@@ -5,16 +5,21 @@ import type {
   First2FinishConfig,
   FlowVariant,
   FullChallengeConfig,
-  TopgearConfig
+  TopgearConfig,
+  DesignConfig
 } from '../types'
 
-function getFlowConfig(config: AppConfig, flow: FlowVariant): FullChallengeConfig | First2FinishConfig {
+function getFlowConfig(config: AppConfig, flow: FlowVariant): FullChallengeConfig | First2FinishConfig | DesignConfig {
   switch (flow) {
     case 'full':
       return config.fullChallenge;
+    case 'design':
+      return config.designChallenge;
     case 'first2finish':
       return config.first2finish;
     case 'topgear':
+      return config.topgear;
+    case 'topgearLate':
       return config.topgear;
     default:
       return config.fullChallenge;
@@ -30,6 +35,10 @@ type Props = {
 type ListInputs = {
   reviewers: string;
   reviewer: string;
+  screener?: string;
+  approver?: string;
+  checkpointScreener?: string;
+  checkpointReviewer?: string;
   submitters: string;
   prizes: string;
   prize: string;
@@ -39,10 +48,11 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
   const [types, setTypes] = useState<any[]>([]);
   const [tracks, setTracks] = useState<any[]>([]);
   const [scorecards, setScorecards] = useState<any[]>([]);
-  const [formConfig, setFormConfig] = useState<FullChallengeConfig | First2FinishConfig>(() => getFlowConfig(config, flow));
-  const [listInputs, setListInputs] = useState<ListInputs>({ reviewers: '', reviewer: '', submitters: '', prizes: '', prize: '' });
+  const [formConfig, setFormConfig] = useState<FullChallengeConfig | First2FinishConfig | DesignConfig>(() => getFlowConfig(config, flow));
+  const [listInputs, setListInputs] = useState<ListInputs>({ reviewers: '', reviewer: '', screener: '', approver: '', checkpointScreener: '', checkpointReviewer: '', submitters: '', prizes: '', prize: '' });
   const isFull = flow === 'full';
-  const iterativeLabel = flow === 'topgear' ? 'Topgear Task' : 'First2Finish';
+  const isDesign = flow === 'design';
+  const iterativeLabel = flow === 'topgear' ? 'Topgear Task' : (flow === 'topgearLate' ? 'Topgear Task (Late)' : 'First2Finish');
 
   const activeConfig = useMemo(() => getFlowConfig(config, flow), [config, flow]);
 
@@ -70,16 +80,24 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
       reviewers: isFull && Array.isArray((activeConfig as FullChallengeConfig).reviewers)
         ? (activeConfig as FullChallengeConfig).reviewers.join(', ')
         : '',
-      reviewer: !isFull ? (activeConfig as First2FinishConfig).reviewer ?? '' : '',
+      reviewer: isDesign ? (activeConfig as DesignConfig).reviewer ?? '' : (!isFull ? (activeConfig as First2FinishConfig).reviewer ?? '' : ''),
+      screener: isFull
+        ? ((activeConfig as FullChallengeConfig).screener ?? '')
+        : isDesign
+          ? ((activeConfig as DesignConfig).screener ?? (activeConfig as DesignConfig).screeningReviewer ?? (activeConfig as DesignConfig).reviewer ?? '')
+          : '',
+      approver: isDesign ? ((activeConfig as DesignConfig).approver ?? (activeConfig as DesignConfig).reviewer ?? '') : '',
+      checkpointScreener: isDesign ? ((activeConfig as DesignConfig).checkpointScreener ?? (activeConfig as DesignConfig).screener ?? (activeConfig as DesignConfig).screeningReviewer ?? (activeConfig as DesignConfig).reviewer ?? '') : '',
+      checkpointReviewer: isDesign ? ((activeConfig as DesignConfig).checkpointReviewer ?? (activeConfig as DesignConfig).reviewer ?? '') : '',
       submitters: Array.isArray(activeConfig.submitters) ? activeConfig.submitters.join(', ') : '',
-      prizes: isFull && Array.isArray((activeConfig as FullChallengeConfig).prizes)
-        ? (activeConfig as FullChallengeConfig).prizes.join(', ')
+      prizes: (isFull || isDesign) && Array.isArray((activeConfig as any).prizes)
+        ? ((activeConfig as any).prizes as number[]).join(', ')
         : '',
-      prize: !isFull && typeof (activeConfig as First2FinishConfig).prize === 'number'
+      prize: (!isFull && !isDesign) && typeof (activeConfig as First2FinishConfig).prize === 'number'
         ? String((activeConfig as First2FinishConfig).prize)
         : ''
     });
-  }, [activeConfig, isFull]);
+  }, [activeConfig, isFull, isDesign]);
 
   useEffect(() => {
     const loadScores = async () => {
@@ -90,14 +108,14 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
       const typeEntry = types.find(t => t.id === formConfig.challengeTypeId);
       const trackEntry = tracks.find(t => t.id === formConfig.challengeTrackId);
       const typeName = typeEntry?.name || formConfig.challengeTypeId;
-      const trackName = trackEntry?.name || formConfig.challengeTrackId;
-      if (!typeName || !trackName) {
+      const trackCode = trackEntry?.track; // Use the API 'track' value, not the display name
+      if (!typeName || !trackCode) {
         setScorecards([]);
         return;
       }
       try {
         const { data } = await axios.get('/api/refdata/scorecards', {
-          params: { challengeType: typeName, challengeTrack: String(trackName).toUpperCase() }
+          params: { challengeType: typeName, challengeTrack: trackCode }
         });
         const list = Array.isArray(data)
           ? data
@@ -122,14 +140,15 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
     const payload: AppConfig = {
       ...config,
       fullChallenge: flow === 'full' ? formConfig as FullChallengeConfig : config.fullChallenge,
+      designChallenge: flow === 'design' ? formConfig as DesignConfig : config.designChallenge,
       first2finish: flow === 'first2finish' ? formConfig as First2FinishConfig : config.first2finish,
-      topgear: flow === 'topgear' ? formConfig as TopgearConfig : config.topgear
+      topgear: (flow === 'topgear' || flow === 'topgearLate') ? formConfig as TopgearConfig : config.topgear
     };
     await axios.post('/api/config', payload);
     onSaved();
   };
 
-  const update = (key: keyof FullChallengeConfig | keyof First2FinishConfig, value: any) => {
+  const update = (key: any, value: any) => {
     setFormConfig(prev => ({ ...prev, [key]: value }));
   };
 
@@ -145,6 +164,33 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
   const updateReviewer = (value: string) => {
     setListInputs(prev => ({ ...prev, reviewer: value }));
     update('reviewer', value.trim());
+  };
+
+  const updateFullScreener = (value: string) => {
+    setListInputs(prev => ({ ...prev, screener: value }));
+    update('screener', value.trim());
+  };
+
+  const updateDesignScreener = (value: string) => {
+    setListInputs(prev => ({ ...prev, screener: value }));
+    const trimmed = value.trim();
+    update('screener', trimmed);
+    update('screeningReviewer', trimmed);
+  };
+
+  const updateApprover = (value: string) => {
+    setListInputs(prev => ({ ...prev, approver: value }));
+    update('approver', value.trim());
+  };
+
+  const updateCheckpointScreener = (value: string) => {
+    setListInputs(prev => ({ ...prev, checkpointScreener: value }));
+    update('checkpointScreener', value.trim());
+  };
+
+  const updateCheckpointReviewer = (value: string) => {
+    setListInputs(prev => ({ ...prev, checkpointReviewer: value }));
+    update('checkpointReviewer', value.trim());
   };
 
   const updatePrizes = (value: string) => {
@@ -172,7 +218,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
 
   return (
     <form className="card" onSubmit={save}>
-      <h3>Edit {flow === 'full' ? 'Full Challenge' : iterativeLabel} Configuration</h3>
+      <h3>Edit {flow === 'full' ? 'Full Challenge' : flow === 'design' ? 'Design Challenge' : iterativeLabel} Configuration</h3>
 
       <div className="row">
         <div className="col">
@@ -216,44 +262,150 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
           <input
             value={formConfig.timelineTemplateId}
             onChange={e => update('timelineTemplateId', e.target.value)}
-            readOnly={!isFull}
-            disabled={!isFull}
-            style={!isFull ? { opacity: 0.8, cursor: 'not-allowed' } : undefined}
+            readOnly={!(isFull || isDesign)}
+            disabled={!(isFull || isDesign)}
+            style={!(isFull || isDesign) ? { opacity: 0.8, cursor: 'not-allowed' } : undefined}
           />
-          {!isFull ? (
+          {(!isFull && !isDesign) ? (
             <small style={{ display: 'block', marginTop: 4, color: '#94a3b8' }}>
               {iterativeLabel} uses a fixed timeline template.
             </small>
           ) : null}
         </div>
-        <div className="col">
-          <label>Scorecard</label>
-          <select value={formConfig.scorecardId} onChange={e => update('scorecardId', e.target.value)}>
-            <option value="">-- Select --</option>
-            {scorecards.map((item: any) => (
-              <option key={item.id} value={item.id}>{item.name}</option>
-            ))}
-          </select>
-        </div>
+        {!isDesign ? (
+          <div className="col">
+            <label>Scorecard</label>
+            <select value={formConfig.scorecardId} onChange={e => update('scorecardId', e.target.value)}>
+              <option value="">-- Select --</option>
+              {scorecards.map((item: any) => (
+                <option key={item.id} value={item.id}>{item.name}</option>
+              ))}
+            </select>
+          </div>
+        ) : null}
       </div>
 
+      {isDesign ? (
+        <div className="row">
+          <div className="col">
+            <label>Review Scorecard</label>
+            <select
+              value={(formConfig as DesignConfig).reviewScorecardId || formConfig.scorecardId}
+              onChange={e => update('reviewScorecardId', e.target.value)}
+            >
+              <option value="">-- Select --</option>
+              {scorecards.map((item: any) => (
+                <option key={item.id} value={item.id}>{item.name}</option>
+              ))}
+            </select>
+          </div>
+          <div className="col">
+            <label>Screening Scorecard</label>
+            <select
+              value={(formConfig as DesignConfig).screeningScorecardId || formConfig.scorecardId}
+              onChange={e => update('screeningScorecardId', e.target.value)}
+            >
+              <option value="">-- Select --</option>
+              {scorecards.map((item: any) => (
+                <option key={item.id} value={item.id}>{item.name}</option>
+              ))}
+            </select>
+          </div>
+          <div className="col">
+            <label>Approval Scorecard</label>
+            <select
+              value={(formConfig as DesignConfig).approvalScorecardId || formConfig.scorecardId}
+              onChange={e => update('approvalScorecardId', e.target.value)}
+            >
+              <option value="">-- Select --</option>
+              {scorecards.map((item: any) => (
+                <option key={item.id} value={item.id}>{item.name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      ) : null}
+
+      {isDesign ? (
+        <div className="row">
+          <div className="col">
+            <label>Checkpoint Screening Scorecard</label>
+            <select value={(formConfig as DesignConfig).checkpointScreeningScorecardId || (formConfig as DesignConfig).checkpointScorecardId} onChange={e => update('checkpointScreeningScorecardId', e.target.value)}>
+              <option value="">-- Select --</option>
+              {scorecards.map((item: any) => (
+                <option key={item.id} value={item.id}>{item.name}</option>
+              ))}
+            </select>
+          </div>
+          <div className="col">
+            <label>Checkpoint Review Scorecard</label>
+            <select value={(formConfig as DesignConfig).checkpointReviewScorecardId || (formConfig as DesignConfig).checkpointScorecardId} onChange={e => update('checkpointReviewScorecardId', e.target.value)}>
+              <option value="">-- Select --</option>
+              {scorecards.map((item: any) => (
+                <option key={item.id} value={item.id}>{item.name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      ) : null}
+
       {isFull ? (
+        <>
+          <div className="row">
+            <div className="col">
+              <label>Submissions per submitter</label>
+              <input
+                type="number"
+                min={1}
+                value={(formConfig as FullChallengeConfig).submissionsPerSubmitter}
+                onChange={e => update('submissionsPerSubmitter', Number(e.target.value))}
+              />
+            </div>
+            <div className="col">
+              <label>Reviewers (comma-separated handles)</label>
+              <input
+                value={listInputs.reviewers}
+                onChange={e => updateHandleList('reviewers', e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="row">
+            <div className="col">
+              <label>Screener handle</label>
+              <input
+                value={listInputs.screener || ''}
+                onChange={e => updateFullScreener(e.target.value)}
+              />
+            </div>
+            <div className="col">
+              <label>Copilot handle</label>
+              <input value={formConfig.copilotHandle} onChange={e => update('copilotHandle', e.target.value)} />
+            </div>
+          </div>
+          <div className="row">
+            <div className="col">
+              <label>Submitters (comma-separated handles)</label>
+              <input
+                value={listInputs.submitters}
+                onChange={e => updateHandleList('submitters', e.target.value)}
+              />
+            </div>
+          </div>
+        </>
+      ) : isDesign ? (
         <div className="row">
           <div className="col">
             <label>Submissions per submitter</label>
             <input
               type="number"
               min={1}
-              value={(formConfig as FullChallengeConfig).submissionsPerSubmitter}
+              value={(formConfig as DesignConfig).submissionsPerSubmitter}
               onChange={e => update('submissionsPerSubmitter', Number(e.target.value))}
             />
           </div>
           <div className="col">
-            <label>Reviewers (comma-separated handles)</label>
-            <input
-              value={listInputs.reviewers}
-              onChange={e => updateHandleList('reviewers', e.target.value)}
-            />
+            <label>Reviewer handle</label>
+            <input value={listInputs.reviewer} onChange={e => updateReviewer(e.target.value)} />
           </div>
         </div>
       ) : (
@@ -269,21 +421,33 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
         </div>
       )}
 
-      {isFull ? (
+      {isDesign ? (
         <div className="row">
           <div className="col">
-            <label>Copilot handle</label>
-            <input value={formConfig.copilotHandle} onChange={e => update('copilotHandle', e.target.value)} />
+            <label>Screener handle</label>
+            <input value={listInputs.screener || ''} onChange={e => updateDesignScreener(e.target.value)} />
           </div>
           <div className="col">
-            <label>Submitters (comma-separated handles)</label>
-            <input
-              value={listInputs.submitters}
-              onChange={e => updateHandleList('submitters', e.target.value)}
-            />
+            <label>Approver handle</label>
+            <input value={listInputs.approver || ''} onChange={e => updateApprover(e.target.value)} />
           </div>
         </div>
-      ) : (
+      ) : null}
+
+      {isDesign ? (
+        <div className="row">
+          <div className="col">
+            <label>Checkpoint Screener handle</label>
+            <input value={listInputs.checkpointScreener || ''} onChange={e => updateCheckpointScreener(e.target.value)} />
+          </div>
+          <div className="col">
+            <label>Checkpoint Reviewer handle</label>
+            <input value={listInputs.checkpointReviewer || ''} onChange={e => updateCheckpointReviewer(e.target.value)} />
+          </div>
+        </div>
+      ) : null}
+
+      {isFull ? null : (
         <div className="row">
           <div className="col">
             <label>Submitters (comma-separated handles)</label>
@@ -292,14 +456,16 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
               onChange={e => updateHandleList('submitters', e.target.value)}
             />
           </div>
-          <div className="col">
-            <label>Prize (winner)</label>
-            <input value={listInputs.prize} onChange={e => updatePrize(e.target.value)} />
-          </div>
+          {(!isDesign) ? (
+            <div className="col">
+              <label>Prize (winner)</label>
+              <input value={listInputs.prize} onChange={e => updatePrize(e.target.value)} />
+            </div>
+          ) : null}
         </div>
       )}
 
-      {isFull ? (
+      {(isFull || isDesign) ? (
         <div className="row">
           <div className="col">
             <label>Prizes (1st, 2nd, 3rd)</label>
@@ -319,7 +485,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
         </div>
       </div>
 
-      {!isFull ? (
+      {(!isFull && !isDesign) ? (
         <div className="row">
           <div className="col">
             <label>Additional Notes</label>

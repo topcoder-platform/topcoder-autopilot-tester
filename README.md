@@ -63,6 +63,13 @@ pnpm run dev
     10. Verify challenge completion & winner assignment
   - **Run full flow** or **stop at a chosen step**.
 
+- **Available Flows**
+  - Full Challenge
+  - First2Finish
+  - Topgear Task
+  - Topgear Task (Late)
+  - Design Challenge
+
 - **Persistence**
   - Saves challenge ID, submission IDs, review IDs, and appeal IDs to `server/data/last-run.json` for reuse/debugging.
 

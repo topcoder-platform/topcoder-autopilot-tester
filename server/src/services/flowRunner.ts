@@ -174,10 +174,11 @@ async function resolvePhaseIdByName(
         if (!phase) continue;
         const name = typeof phase.name === 'string' ? phase.name.toLowerCase() : '';
         if (name !== normalized) continue;
+        // Prefer the phase TEMPLATE id (phaseId) over the runtime phase id (id)
         const candidate =
-          toStringId((phase as any).id) ||
           toStringId((phase as any).phaseId) ||
           toStringId((phase as any).phase_id) ||
+          toStringId((phase as any).id) ||
           toStringId((phase as any).legacyId);
         if (candidate) {
           return candidate;
@@ -456,6 +457,8 @@ async function stepUpdateDraft(
     status: 'DRAFT',
     attachmentIds: []
   };
+  // Sanity check: ensure reviewer phaseIds correspond to phase TEMPLATE ids on the challenge
+  await sanityCheckReviewerPhaseTemplates(log, token, challengeId, body.reviewers as Array<{ phaseId?: string }>, cancel);
   const updated = await TC.updateChallenge(token, challengeId, body);
   cancel.check();
   log.info('Challenge updated to DRAFT', { challengeId, request: body }, getStepProgress('updateDraft'));
@@ -466,6 +469,63 @@ async function stepUpdateDraft(
     scorecardId: cfg.scorecardId
   });
   return updated;
+}
+
+async function sanityCheckReviewerPhaseTemplates(
+  log: RunnerLogger,
+  token: string,
+  challengeId: string,
+  reviewers: Array<{ phaseId?: string }>,
+  cancel: CancellationHelpers,
+) {
+  try {
+    cancel.check();
+    const challenge = await TC.getChallenge(token, challengeId);
+    const phases: any[] = Array.isArray(challenge?.phases) ? challenge.phases : [];
+    const templateIds = new Set(
+      phases
+        .map((p: any) => (typeof p?.phaseId === 'string' ? p.phaseId : (typeof p?.phase_id === 'string' ? p.phase_id : undefined)))
+        .filter(Boolean)
+    );
+    const runtimeIds = new Set(
+      phases
+        .map((p: any) => (typeof p?.id === 'string' ? p.id : undefined))
+        .filter(Boolean)
+    );
+
+    const unknown: string[] = [];
+    const looksRuntime: string[] = [];
+    for (const r of reviewers) {
+      const pid = typeof r?.phaseId === 'string' ? r.phaseId : undefined;
+      if (!pid) continue;
+      if (!templateIds.has(pid)) {
+        unknown.push(pid);
+        if (runtimeIds.has(pid)) {
+          looksRuntime.push(pid);
+        }
+      }
+    }
+
+    if (unknown.length) {
+      log.warn('Reviewer phaseId sanity check: some IDs are not template IDs', {
+        challengeId,
+        unknownPhaseIds: Array.from(new Set(unknown)),
+        lookLikeRuntimeIds: Array.from(new Set(looksRuntime)),
+        knownTemplateIdsCount: templateIds.size,
+      });
+    } else {
+      log.info('Reviewer phaseId sanity check passed', {
+        challengeId,
+        reviewers: reviewers.length,
+        templateIds: templateIds.size,
+      });
+    }
+  } catch (error: any) {
+    log.warn('Reviewer phaseId sanity check failed (non-fatal)', {
+      challengeId,
+      error: error?.message || String(error),
+    });
+  }
 }
 
 async function stepActivate(
@@ -536,7 +596,7 @@ async function stepAssignResources(
   ctx?: StepContext
 ) {
   cancel.check();
-  log.info('Assigning resources (copilot, reviewers, submitters)...');
+  log.info('Assigning resources (copilot, screener, reviewers, submitters)...');
   const { readLastRun, writeLastRun } = await import('../utils/lastRun.js');
   const lr = readLastRun();
   const reviewerResources = { ...(lr.reviewerResources || {}) } as Record<string, string>;
@@ -554,9 +614,10 @@ async function stepAssignResources(
   const need = {
     Submitter: roleIdByName['Submitter'],
     Reviewer: roleIdByName['Reviewer'],
-    Copilot: roleIdByName['Copilot']
+    Copilot: roleIdByName['Copilot'],
+    Screener: roleIdByName['Screener']
   };
-  if (!need.Submitter || !need.Reviewer || !need.Copilot) {
+  if (!need.Submitter || !need.Reviewer || !need.Copilot || !need.Screener) {
     log.warn('Could not find one or more required resource role IDs', need);
   }
   // Copilot
@@ -573,6 +634,32 @@ async function stepAssignResources(
     log.info('RES addResource', { ok: true });
     log.info('Added copilot', { handle: cfg.copilotHandle });
   }
+  // Screener
+  if (cfg.screener && need.Screener) {
+    cancel.check();
+    log.info('REQ getMemberByHandle', { handle: cfg.screener });
+    const mem = await TC.getMemberByHandle(token, cfg.screener);
+    cancel.check();
+    log.info('RES getMemberByHandle', { handle: cfg.screener, userId: mem.userId });
+    const payload = { challengeId, memberId: String(mem.userId), roleId: need.Screener };
+    log.info('REQ addResource', payload);
+    try {
+      await TC.addResource(token, payload);
+      cancel.check();
+      log.info('RES addResource', { ok: true });
+      log.info('Added screener', { handle: cfg.screener });
+    } catch (error: any) {
+      cancel.check();
+      log.warn('Failed to add screener resource (may already exist)', {
+        handle: cfg.screener,
+        error: error?.message || String(error)
+      });
+      if (ctx) ctx.recordFailure(error, { requestBody: payload });
+    }
+  } else if (cfg.screener && !need.Screener) {
+    log.warn('Screener handle configured but Screener role ID not found', { handle: cfg.screener });
+  }
+
   // Reviewers
   for (const h of cfg.reviewers) {
     cancel.check();
@@ -647,6 +734,7 @@ async function stepAssignResources(
 
   const summary = {
     copilot: cfg.copilotHandle ? 1 : 0,
+    screener: cfg.screener ? 1 : 0,
     reviewers: cfg.reviewers.length,
     submitters: cfg.submitters.length
   };

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import configRouter from './routes/config.js';
 import runRouter from './routes/run.js';
 import refdataRouter from './routes/refdata.js';
+import challengesRouter from './routes/challenges.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +18,7 @@ app.use(express.json({ limit: '1mb' }));
 app.use('/api/config', configRouter);
 app.use('/api/run', runRouter);
 app.use('/api/refdata', refdataRouter);
+app.use('/api/challenges', challengesRouter);
 
 const PORT = process.env.PORT || 5055;
 app.listen(PORT, () => {

@@ -230,6 +230,13 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
   const [challengeId, setChallengeId] = useState<string | null>(null);
   const [refreshCount, setRefreshCount] = useState(0);
   const [lastRefreshTimestamp, setLastRefreshTimestamp] = useState<string | null>(null);
+  const [activeSnapshotTab, setActiveSnapshotTab] = useState<'challenge' | 'reviews'>('challenge');
+  const [reviews, setReviews] = useState<any[]>([]);
+  const [reviewsMeta, setReviewsMeta] = useState<Record<string, unknown> | null>(null);
+  const [isLoadingReviews, setIsLoadingReviews] = useState(false);
+  const [reviewsError, setReviewsError] = useState<string | null>(null);
+  const [reviewFetchCount, setReviewFetchCount] = useState(0);
+  const [lastReviewFetchTimestamp, setLastReviewFetchTimestamp] = useState<string | null>(null);
   const [runToken, setRunToken] = useState(0);
   const [stepStatuses, setStepStatuses] = useState<Record<StepName, StepStatus>>(() => buildInitialStepStatuses(stepIds));
   const [stepFailures, setStepFailures] = useState<StepRequestMap>({});
@@ -240,6 +247,7 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
   const sourceRef = useRef<EventSource | null>(null);
   const snapshotCounterRef = useRef(0);
   const copyTooltipTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reviewFetchControllerRef = useRef<AbortController | null>(null);
   const [isCopyTooltipVisible, setIsCopyTooltipVisible] = useState(false);
 
   useEffect(() => {
@@ -350,13 +358,88 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
         clearTimeout(copyTooltipTimeoutRef.current);
         copyTooltipTimeoutRef.current = null;
       }
+      if (reviewFetchControllerRef.current) {
+        reviewFetchControllerRef.current.abort();
+        reviewFetchControllerRef.current = null;
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (!challengeId || refreshCount === 0) {
+      if (reviewFetchControllerRef.current) {
+        reviewFetchControllerRef.current.abort();
+        reviewFetchControllerRef.current = null;
+      }
+      setIsLoadingReviews(false);
+      setReviews([]);
+      setReviewsMeta(null);
+      setReviewsError(null);
+      setReviewFetchCount(0);
+      setLastReviewFetchTimestamp(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    if (reviewFetchControllerRef.current) {
+      reviewFetchControllerRef.current.abort();
+    }
+    reviewFetchControllerRef.current = controller;
+    setIsLoadingReviews(true);
+    setReviewsError(null);
+
+    const load = async () => {
+      try {
+        const response = await fetch(`/api/challenges/${encodeURIComponent(challengeId)}/reviews`, {
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || `Request failed with status ${response.status}`);
+        }
+        const json = await response.json();
+        const items = Array.isArray(json)
+          ? json
+          : Array.isArray((json as any)?.data)
+            ? (json as any).data
+            : [];
+        const meta = !Array.isArray(json) && json && typeof json === 'object' ? (json as any).meta ?? null : null;
+        if (controller.signal.aborted) return;
+        setReviews(items);
+        setReviewsMeta(meta);
+        setReviewFetchCount(prev => prev + 1);
+        const timestamp = new Date().toISOString();
+        setLastReviewFetchTimestamp(timestamp);
+      } catch (error: any) {
+        if (error?.name === 'AbortError') return;
+        if (controller.signal.aborted) return;
+        setReviews([]);
+        setReviewsMeta(null);
+        setReviewsError(error?.message || String(error));
+      } finally {
+        if (controller.signal.aborted) return;
+        setIsLoadingReviews(false);
+        if (reviewFetchControllerRef.current === controller) {
+          reviewFetchControllerRef.current = null;
+        }
+      }
+    };
+
+    load();
+
+    return () => {
+      controller.abort();
+    };
+  }, [challengeId, refreshCount]);
 
   const startRun = () => {
     if (sourceRef.current) {
       sourceRef.current.close();
       sourceRef.current = null;
+    }
+    if (reviewFetchControllerRef.current) {
+      reviewFetchControllerRef.current.abort();
+      reviewFetchControllerRef.current = null;
     }
     setIsRunning(false);
     setLogs([]);
@@ -364,6 +447,13 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
     setChallengeId(null);
     setRefreshCount(0);
     setLastRefreshTimestamp(null);
+    setActiveSnapshotTab('challenge');
+    setReviews([]);
+    setReviewsMeta(null);
+    setReviewsError(null);
+    setReviewFetchCount(0);
+    setLastReviewFetchTimestamp(null);
+    setIsLoadingReviews(false);
     snapshotCounterRef.current = 0;
     setProgress(0);
     setStepStatuses(buildInitialStepStatuses(stepIds));
@@ -393,6 +483,22 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
     const prefix = `${String(entry.index + 1).padStart(2, '0')}. `;
     return `${prefix}${entry.label}`;
   };
+
+  const totalReviewsCount = (() => {
+    if (reviewsMeta && typeof (reviewsMeta as any).totalCount === 'number') {
+      return (reviewsMeta as any).totalCount as number;
+    }
+    return reviews.length;
+  })();
+
+  const reviewStatusText = (() => {
+    if (!challengeId) return 'Waiting for challenge before loading reviews';
+    if (isLoadingReviews) return 'Loading reviews…';
+    if (!lastReviewFetchTimestamp) return 'No reviews fetched yet';
+    const count = totalReviewsCount;
+    const fetchSuffix = reviewFetchCount > 0 ? ` • ${reviewFetchCount} fetch${reviewFetchCount === 1 ? '' : 'es'}` : '';
+    return `Last fetched ${new Date(lastReviewFetchTimestamp).toLocaleString()} • ${count} review${count === 1 ? '' : 's'}${fetchSuffix}`;
+  })();
 
   return (
     <>
@@ -484,83 +590,121 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
       </div>
       <div className="col" style={{ minWidth: 0 }}>
         <div className="card" style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-            <h3 style={{ marginBottom: 0 }}>Challenge snapshots</h3>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'flex-end', textAlign: 'right', flexWrap: 'wrap' }}>
-              <span style={{ color: '#94a3b8', fontSize: 12 }}>
-                {lastRefreshTimestamp
-                  ? `Last refresh ${new Date(lastRefreshTimestamp).toLocaleString()} • ${refreshCount} refresh${refreshCount === 1 ? '' : 'es'}`
-                  : 'No refreshes yet'}
-              </span>
-              {challengeId ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end', textAlign: 'right' }}>
-                  <span style={{ color: '#94a3b8', fontWeight: 500 }}>ID {challengeId}</span>
-                  <div style={{ position: 'relative', display: 'inline-flex' }}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard?.writeText(challengeId);
-                        setIsCopyTooltipVisible(true);
-                        if (copyTooltipTimeoutRef.current) clearTimeout(copyTooltipTimeoutRef.current);
-                        copyTooltipTimeoutRef.current = setTimeout(() => {
-                          setIsCopyTooltipVisible(false);
-                          copyTooltipTimeoutRef.current = null;
-                        }, 2000);
-                      }}
-                      title="Copy challenge ID"
-                      aria-label="Copy challenge ID"
-                      style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '4px 6px' }}
-                    >
-                      <svg
-                        aria-hidden="true"
-                        focusable="false"
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                        style={{ display: 'block' }}
-                      >
-                        <path
-                          d="M8 3H17L21 7V21H8V3Z"
-                          stroke="currentColor"
-                          strokeWidth="1.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                        <path
-                          d="M3 3H8V21H3V3Z"
-                          stroke="currentColor"
-                          strokeWidth="1.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                    </button>
-                    {isCopyTooltipVisible ? (
-                      <div
-                        role="status"
-                        style={{
-                          position: 'absolute',
-                          bottom: '100%',
-                          right: 0,
-                          transform: 'translateY(-6px)',
-                          background: '#0b1220',
-                          color: '#e2e8f0',
-                          border: '1px solid #1e293b',
-                          borderRadius: 6,
-                          padding: '6px 8px',
-                          fontSize: 11,
-                          whiteSpace: 'nowrap',
-                          boxShadow: '0 4px 12px rgba(15, 23, 42, 0.45)'
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+              <h3 style={{ marginBottom: 0 }}>Challenge snapshots</h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'flex-end', textAlign: 'right', flexWrap: 'wrap' }}>
+                <span style={{ color: '#94a3b8', fontSize: 12 }}>
+                  {activeSnapshotTab === 'challenge'
+                    ? (
+                      lastRefreshTimestamp
+                        ? `Last refresh ${new Date(lastRefreshTimestamp).toLocaleString()} • ${refreshCount} refresh${refreshCount === 1 ? '' : 'es'}`
+                        : 'No refreshes yet'
+                    )
+                    : reviewStatusText}
+                </span>
+                {challengeId ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end', textAlign: 'right' }}>
+                    <span style={{ color: '#94a3b8', fontWeight: 500 }}>ID {challengeId}</span>
+                    <div style={{ position: 'relative', display: 'inline-flex' }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(challengeId);
+                          setIsCopyTooltipVisible(true);
+                          if (copyTooltipTimeoutRef.current) clearTimeout(copyTooltipTimeoutRef.current);
+                          copyTooltipTimeoutRef.current = setTimeout(() => {
+                            setIsCopyTooltipVisible(false);
+                            copyTooltipTimeoutRef.current = null;
+                          }, 2000);
                         }}
+                        title="Copy challenge ID"
+                        aria-label="Copy challenge ID"
+                        style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '4px 6px' }}
                       >
-                        Challenge ID copied to clipboard
-                      </div>
-                    ) : null}
+                        <svg
+                          aria-hidden="true"
+                          focusable="false"
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          xmlns="http://www.w3.org/2000/svg"
+                          style={{ display: 'block' }}
+                        >
+                          <path
+                            d="M8 3H17L21 7V21H8V3Z"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                          <path
+                            d="M3 3H8V21H3V3Z"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                      {isCopyTooltipVisible ? (
+                        <div
+                          role="status"
+                          style={{
+                            position: 'absolute',
+                            bottom: '100%',
+                            right: 0,
+                            transform: 'translateY(-6px)',
+                            background: '#0b1220',
+                            color: '#e2e8f0',
+                            border: '1px solid #1e293b',
+                            borderRadius: 6,
+                            padding: '6px 8px',
+                            fontSize: 11,
+                            whiteSpace: 'nowrap',
+                            boxShadow: '0 4px 12px rgba(15, 23, 42, 0.45)'
+                          }}
+                        >
+                          Challenge ID copied to clipboard
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-              ) : null}
+                ) : null}
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={() => setActiveSnapshotTab('challenge')}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: 6,
+                  border: `1px solid ${activeSnapshotTab === 'challenge' ? '#1f2937' : '#1e293b'}`,
+                  background: activeSnapshotTab === 'challenge' ? '#1e293b' : '#0f172a',
+                  color: activeSnapshotTab === 'challenge' ? '#f8fafc' : '#94a3b8',
+                  fontWeight: activeSnapshotTab === 'challenge' ? 600 : 500,
+                  cursor: 'pointer'
+                }}
+              >
+                Challenge
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSnapshotTab('reviews')}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: 6,
+                  border: `1px solid ${activeSnapshotTab === 'reviews' ? '#1f2937' : '#1e293b'}`,
+                  background: activeSnapshotTab === 'reviews' ? '#1e293b' : '#0f172a',
+                  color: activeSnapshotTab === 'reviews' ? '#f8fafc' : '#94a3b8',
+                  fontWeight: activeSnapshotTab === 'reviews' ? 600 : 500,
+                  cursor: 'pointer'
+                }}
+              >
+                Reviews
+              </button>
             </div>
           </div>
           <div style={{
@@ -574,21 +718,71 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
             flex: 1,
             minHeight: 0
           }}>
-            {challengeSnapshots.length === 0 ? (
-              <div style={{ color: '#94a3b8' }}>Waiting for challenge refreshes…</div>
-            ) : (
-              challengeSnapshots.map(snapshot => (
-                <div key={snapshot.id} style={{ marginBottom: 16 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8' }}>
-                    <span>Refresh #{snapshot.id}{snapshot.stage ? ` • ${snapshot.stage}` : ''}</span>
-                    <span>{new Date(snapshot.timestamp).toLocaleTimeString()}</span>
+            {activeSnapshotTab === 'challenge' ? (
+              challengeSnapshots.length === 0 ? (
+                <div style={{ color: '#94a3b8' }}>Waiting for challenge refreshes…</div>
+              ) : (
+                challengeSnapshots.map(snapshot => (
+                  <div key={snapshot.id} style={{ marginBottom: 16 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8' }}>
+                      <span>Refresh #{snapshot.id}{snapshot.stage ? ` • ${snapshot.stage}` : ''}</span>
+                      <span>{new Date(snapshot.timestamp).toLocaleTimeString()}</span>
+                    </div>
+                    <pre
+                      style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}
+                      dangerouslySetInnerHTML={{ __html: highlightJson(snapshot.challenge) }}
+                    />
                   </div>
-                  <pre
-                    style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}
-                    dangerouslySetInnerHTML={{ __html: highlightJson(snapshot.challenge) }}
-                  />
-                </div>
-              ))
+                ))
+              )
+            ) : (
+              <>
+                {isLoadingReviews ? (
+                  <div style={{ color: '#94a3b8', marginBottom: reviews.length > 0 ? 12 : 0 }}>
+                    Refreshing reviews…
+                  </div>
+                ) : null}
+                {!challengeId ? (
+                  <div style={{ color: '#94a3b8' }}>Waiting for challenge before loading reviews…</div>
+                ) : reviewsError ? (
+                  <div style={{ color: '#fca5a5' }}>Failed to load reviews: {reviewsError}</div>
+                ) : reviews.length === 0 ? (
+                  <div style={{ color: '#94a3b8' }}>No reviews returned yet.</div>
+                ) : (
+                  reviews.map((review, index) => {
+                    const status = typeof review?.status === 'string' ? review.status : '';
+                    const updatedRaw = typeof review?.updated === 'string'
+                      ? review.updated
+                      : typeof review?.updatedAt === 'string'
+                        ? review.updatedAt
+                        : typeof review?.modified === 'string'
+                          ? review.modified
+                          : typeof review?.created === 'string'
+                            ? review.created
+                            : null;
+                    const updatedLabel = (() => {
+                      if (!updatedRaw) return '';
+                      const date = new Date(updatedRaw);
+                      return Number.isNaN(date.valueOf()) ? updatedRaw : date.toLocaleString();
+                    })();
+                    const keyCandidate = review?.id ?? review?.reviewId ?? review?.submissionId ?? `${index}`;
+                    const titleParts = [`Review #${index + 1}`];
+                    if (status) titleParts.push(status);
+                    return (
+                      <div key={String(keyCandidate)} style={{ marginBottom: 16 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8' }}>
+                          <span>{titleParts.join(' • ')}</span>
+                          <span>{updatedLabel}</span>
+                        </div>
+                        <pre
+                          style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}
+                          dangerouslySetInnerHTML={{ __html: highlightJson(review) }}
+                        />
+                      </div>
+                    );
+                  })
+                )}
+              </>
             )}
           </div>
         </div>

@@ -14,9 +14,11 @@ export type StepName =
   | 'activate'
   | 'awaitRegSubOpen'
   | 'assignResources'
+  | 'awaitSubmissionEnd'
   | 'loadInitialSubmissions'
   | 'processReviews'
   | 'finalSubmission'
+  | 'postMortem'
   | 'awaitWinner';
 
 const STEPS: StepName[] = [
@@ -26,9 +28,11 @@ const STEPS: StepName[] = [
   'activate',
   'awaitRegSubOpen',
   'assignResources',
+  'awaitSubmissionEnd',
   'loadInitialSubmissions',
   'processReviews',
   'finalSubmission',
+  'postMortem',
   'awaitWinner'
 ];
 
@@ -151,6 +155,52 @@ function extractStepFailure(error: any): StepRequestLog {
 
 function logChallengeSnapshot(log: RunnerLogger, stage: StepName, challenge: any) {
   log.info('Challenge refresh', { stage, challenge });
+}
+
+function toStringId(value: unknown) {
+  if (typeof value === 'string' && value.trim()) return value;
+  if (typeof value === 'number' && !Number.isNaN(value)) return String(value);
+  return undefined;
+}
+
+async function resolvePhaseIdByName(
+  log: RunnerLogger,
+  token: string,
+  challengeId: string,
+  phaseName: string,
+  cancel: CancellationHelpers
+): Promise<string | undefined> {
+  const normalized = phaseName.trim().toLowerCase();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    cancel.check();
+    try {
+      const challenge = await TC.getChallenge(token, challengeId);
+      const phases = Array.isArray(challenge?.phases) ? challenge.phases : [];
+      for (const phase of phases) {
+        if (!phase) continue;
+        const name = typeof phase.name === 'string' ? phase.name.toLowerCase() : '';
+        if (name !== normalized) continue;
+        // Prefer the phase TEMPLATE id (phaseId) over the runtime phase id (id)
+        const candidate =
+          toStringId((phase as any).phaseId) ||
+          toStringId((phase as any).phase_id) ||
+          toStringId((phase as any).id) ||
+          toStringId((phase as any).legacyId);
+        if (candidate) {
+          return candidate;
+        }
+      }
+    } catch (error: any) {
+      log.warn('Failed to load challenge while locating phase ID', {
+        challengeId,
+        phase: phaseName,
+        attempt: attempt + 1,
+        error: error?.message || String(error)
+      });
+    }
+    if (attempt < 2) await cancel.wait(500);
+  }
+  return undefined;
 }
 
 async function withStep<T>(
@@ -357,6 +407,8 @@ async function stepUpdateDraft(
     status: 'DRAFT',
     attachmentIds: []
   };
+  // Sanity check: ensure reviewer phaseIds correspond to phase TEMPLATE ids on the challenge
+  await sanityCheckReviewerPhaseTemplates(log, token, challengeId, body.reviewers as Array<{ phaseId?: string }>, cancel);
   const updated = await TC.updateChallenge(token, challengeId, body);
   cancel.check();
   const normalizedSubmissionPhase = submissionPhaseName.trim().toLowerCase();
@@ -366,6 +418,63 @@ async function stepUpdateDraft(
   }
   log.info('Challenge updated to DRAFT', { challengeId, request: body }, getStepProgress('updateDraft'));
   return updated;
+}
+
+async function sanityCheckReviewerPhaseTemplates(
+  log: RunnerLogger,
+  token: string,
+  challengeId: string,
+  reviewers: Array<{ phaseId?: string }>,
+  cancel: CancellationHelpers,
+) {
+  try {
+    cancel.check();
+    const challenge = await TC.getChallenge(token, challengeId);
+    const phases: any[] = Array.isArray(challenge?.phases) ? challenge.phases : [];
+    const templateIds = new Set(
+      phases
+        .map((p: any) => (typeof p?.phaseId === 'string' ? p.phaseId : (typeof p?.phase_id === 'string' ? p.phase_id : undefined)))
+        .filter(Boolean)
+    );
+    const runtimeIds = new Set(
+      phases
+        .map((p: any) => (typeof p?.id === 'string' ? p.id : undefined))
+        .filter(Boolean)
+    );
+
+    const unknown: string[] = [];
+    const looksRuntime: string[] = [];
+    for (const r of reviewers) {
+      const pid = typeof r?.phaseId === 'string' ? r.phaseId : undefined;
+      if (!pid) continue;
+      if (!templateIds.has(pid)) {
+        unknown.push(pid);
+        if (runtimeIds.has(pid)) {
+          looksRuntime.push(pid);
+        }
+      }
+    }
+
+    if (unknown.length) {
+      log.warn('Reviewer phaseId sanity check: some IDs are not template IDs', {
+        challengeId,
+        unknownPhaseIds: Array.from(new Set(unknown)),
+        lookLikeRuntimeIds: Array.from(new Set(looksRuntime)),
+        knownTemplateIdsCount: templateIds.size,
+      });
+    } else {
+      log.info('Reviewer phaseId sanity check passed', {
+        challengeId,
+        reviewers: reviewers.length,
+        templateIds: templateIds.size,
+      });
+    }
+  } catch (error: any) {
+    log.warn('Reviewer phaseId sanity check failed (non-fatal)', {
+      challengeId,
+      error: error?.message || String(error),
+    });
+  }
 }
 
 function sanitizePhasePatchPayload(phase: any) {
@@ -578,6 +687,45 @@ async function stepAwaitPhasesOpen(
   }
 }
 
+async function stepAwaitSubmissionScheduledEnd(
+  log: RunnerLogger,
+  token: string,
+  challengeId: string,
+  cancel: CancellationHelpers,
+  submissionPhaseName: string
+) {
+  log.info(`Waiting until ${submissionPhaseName} scheduled end is reached...`);
+  let announced = false;
+  while (true) {
+    cancel.check();
+    try {
+      const ch = await TC.getChallenge(token, challengeId);
+      logChallengeSnapshot(log, 'awaitSubmissionEnd', ch);
+      const phases = Array.isArray(ch?.phases) ? ch.phases : [];
+      const submissionPhase = phases.find((p: any) => p?.name === submissionPhaseName);
+      const end = submissionPhase?.scheduledEndDate ? new Date(submissionPhase.scheduledEndDate).getTime() : null;
+      const isOpen = submissionPhase?.isOpen === true;
+      if (end) {
+        const now = Date.now();
+        if (now >= end + 1000) {
+          log.info(`${submissionPhaseName} scheduled end reached`, { isOpen }, getStepProgress('awaitSubmissionEnd'));
+          return;
+        }
+        const waitMs = Math.min(end - now + 1000, 15_000);
+        if (!announced) {
+          log.info('Waiting for scheduled end of submission phase', { ms: waitMs });
+          announced = true;
+        }
+        await cancel.wait(Math.max(1000, waitMs));
+        continue;
+      }
+    } catch (e: any) {
+      log.warn('Failed to refresh challenge while waiting for scheduled end; will retry', { error: e?.message || String(e) });
+    }
+    await cancel.wait(5000);
+  }
+}
+
 type ReviewerAssignment = {
   resourceId: string;
   handle: string;
@@ -768,11 +916,7 @@ function buildReviewItems(questions: any[], outcome: ReviewOutcome) {
   }).filter(Boolean);
 }
 
-function toStringId(value: unknown) {
-  if (typeof value === 'string' && value.trim()) return value;
-  if (typeof value === 'number' && !Number.isNaN(value)) return String(value);
-  return undefined;
-}
+// toStringId moved above for reuse
 
 function collectValues(candidate: any, keys: string[]): string[] {
   const results: string[] = [];
@@ -1056,7 +1200,8 @@ async function stepLoadInitialSubmissions(
   cfg: First2FinishConfig,
   challengeId: string,
   reviewer: ReviewerAssignment,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  initialPerSubmitter: number
 ): Promise<SubmissionFlowState> {
   const helpers = await prepareSubmissionHelpers(log, token, cfg, challengeId, reviewer, cancel);
   const submitterHandles = helpers.submitterHandles;
@@ -1066,12 +1211,12 @@ async function stepLoadInitialSubmissions(
 
   const initialBatch: SubmissionRecord[] = [];
   log.info('Creating initial submission batch for iterative queue', {
-    perSubmitter: INITIAL_SUBMISSIONS_PER_SUBMITTER,
+    perSubmitter: initialPerSubmitter,
     submitters: submitterHandles,
     delayMs: INITIAL_SUBMISSION_DELAY_MS
   });
 
-  for (let round = 0; round < INITIAL_SUBMISSIONS_PER_SUBMITTER; round += 1) {
+  for (let round = 0; round < initialPerSubmitter; round += 1) {
     for (let idx = 0; idx < submitterHandles.length; idx += 1) {
       cancel.check();
       const handle = submitterHandles[idx];
@@ -1083,7 +1228,7 @@ async function stepLoadInitialSubmissions(
         position: record.index
       });
       initialBatch.push(record);
-      const isLast = round === INITIAL_SUBMISSIONS_PER_SUBMITTER - 1 && idx === submitterHandles.length - 1;
+      const isLast = round === initialPerSubmitter - 1 && idx === submitterHandles.length - 1;
       if (!isLast) {
         await cancel.wait(INITIAL_SUBMISSION_DELAY_MS);
       }
@@ -1101,17 +1246,19 @@ async function stepLoadInitialSubmissions(
 async function stepProcessReviews(
   log: RunnerLogger,
   state: SubmissionFlowState,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  processOnlyFirst = false
 ): Promise<SubmissionFlowState> {
   const { helpers, initialBatch } = state;
-  for (const record of initialBatch) {
+  const toProcess = processOnlyFirst ? initialBatch.slice(0, 1) : initialBatch;
+  for (const record of toProcess) {
     cancel.check();
     log.info('Processing initial submission with failing review', { submissionId: record.id, handle: record.handle });
     await helpers.completeReview('processReviews', record, 'fail');
   }
 
   await helpers.ensureIterativePhase(false, 'processReviews');
-  log.info('Initial failing reviews completed; iterative review phase closed', { processed: initialBatch.length }, getStepProgress('processReviews'));
+  log.info('Initial failing reviews completed; iterative review phase closed', { processed: toProcess.length }, getStepProgress('processReviews'));
 
   return state;
 }
@@ -1119,7 +1266,11 @@ async function stepProcessReviews(
 async function stepFinalizeSubmission(
   log: RunnerLogger,
   state: SubmissionFlowState,
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  late: boolean,
+  submissionPhaseName: string,
+  token: string,
+  challengeId: string
 ) {
   const { helpers, initialBatch } = state;
   const submitterHandles = helpers.submitterHandles;
@@ -1127,10 +1278,68 @@ async function stepFinalizeSubmission(
     throw new Error('First2Finish flow requires at least one submitter handle');
   }
 
-  cancel.check();
-  await cancel.wait(INITIAL_SUBMISSION_DELAY_MS);
+  if (late) {
+    log.info('Late mode enabled: waiting for submission phase scheduled end before final submission', { submissionPhaseName });
+    // Poll the challenge until the submission phase scheduledEndDate is in the past
+    let waited = false;
+    for (;;) {
+      cancel.check();
+      try {
+        const ch = await TC.getChallenge(token, challengeId);
+        const phases = Array.isArray(ch?.phases) ? ch.phases : [];
+        const submissionPhase = phases.find((p: any) => p?.name === submissionPhaseName);
+        const end = submissionPhase?.scheduledEndDate ? new Date(submissionPhase.scheduledEndDate).getTime() : null;
+        const isOpen = submissionPhase?.isOpen === true;
+        if (end) {
+          const now = Date.now();
+          if (now >= end + 1000) {
+            log.info('Submission phase scheduled end reached; proceeding with late submission', { isOpen });
+            break;
+          }
+          const waitMs = Math.min(end - now + 1000, 15_000);
+          if (!waited) {
+            log.info('Waiting for scheduled end of submission phase', { ms: waitMs });
+            waited = true;
+          }
+          await cancel.wait(Math.max(1000, waitMs));
+          continue;
+        }
+      } catch (e: any) {
+        log.warn('Failed to refresh challenge while waiting for scheduled end; will retry', { error: e?.message || String(e) });
+      }
+      await cancel.wait(5000);
+    }
+  } else {
+    cancel.check();
+    await cancel.wait(INITIAL_SUBMISSION_DELAY_MS);
+  }
+
+  // For late submissions, validate that Registration and Submission remain open
+  // until a passing iterative review is completed.
+  if (late) {
+    try {
+      const ch = await TC.getChallenge(token, challengeId);
+      const phases = Array.isArray(ch?.phases) ? ch.phases : [];
+      const submissionPhase = phases.find((p: any) => p?.name === submissionPhaseName);
+      const registrationPhase = phases.find((p: any) => p?.name === 'Registration');
+      const submissionOpen = submissionPhase?.isOpen === true;
+      const registrationOpen = registrationPhase?.isOpen === true;
+      if (!submissionOpen || !registrationOpen) {
+        throw new Error(`Expected Registration and ${submissionPhaseName} to remain open before passing review (late mode). Observed: registrationOpen=${registrationOpen}, submissionOpen=${submissionOpen}`);
+      }
+      log.info('Validated Registration and Submission are still open prior to passing review (late mode)', {
+        registrationOpen,
+        submissionOpen,
+        submissionPhaseName
+      });
+    } catch (e: any) {
+      // Surface the failure to the runner; this is a validation requirement for late mode.
+      throw e;
+    }
+  }
+
   const finalHandle = submitterHandles[0];
-  log.info('Creating final submission for passing review', { handle: finalHandle });
+  log.info(late ? 'Creating LATE final submission for passing review' : 'Creating final submission for passing review', { handle: finalHandle });
   const winningSubmission = await helpers.queueSubmission(finalHandle);
   await helpers.completeReview('finalSubmission', winningSubmission, 'pass');
 
@@ -1146,6 +1355,97 @@ async function stepFinalizeSubmission(
     winningSubmission,
     submissionRecords
   };
+}
+
+async function stepPostMortem(
+  log: RunnerLogger,
+  token: string,
+  challengeId: string,
+  cancel: CancellationHelpers,
+  enablePostMortem: boolean,
+  scorecardIdForPostMortem: string,
+  reviewerHandle: string
+) {
+  if (!enablePostMortem) {
+    log.info('Post-Mortem disabled; skipping');
+    return;
+  }
+
+  log.info('Processing Post-Mortem phase if present...');
+  // Try for some time to detect and complete post-mortem reviews
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    cancel.check();
+    const challenge = await TC.getChallenge(token, challengeId);
+    logChallengeSnapshot(log, 'postMortem', challenge);
+    const phases = Array.isArray(challenge?.phases) ? challenge.phases : [];
+    const postMortemPhase = phases.find((p: any) => typeof p?.name === 'string' && /post[- ]?mortem/i.test(p.name));
+    if (postMortemPhase?.isOpen) {
+      try {
+        const { readLastRun } = await import('../utils/lastRun.js');
+        const lr = readLastRun();
+        const reviewerResourceId = lr.reviewerResources?.[reviewerHandle];
+        const resourceIds: string[] = reviewerResourceId ? [String(reviewerResourceId)] : Array.from(new Set(Object.values(lr.reviewerResources || {}).map((v: any) => String(v))));
+        const listResponse = await TC.listReviews(token, challengeId);
+        const existingReviews = Array.isArray(listResponse) ? listResponse : Array.isArray((listResponse as any)?.data) ? (listResponse as any).data : [];
+        const pending: any[] = [];
+        for (const rev of existingReviews) {
+          const status = typeof rev?.status === 'string' ? rev.status.toUpperCase() : '';
+          if (status !== 'PENDING' && status !== 'IN_PROGRESS') continue;
+          const resId = toStringId((rev as any).resourceId);
+          const phaseId = toStringId((rev as any).phaseId) || toStringId((rev as any).reviewPhaseId) || toStringId((rev as any).metadata?.phaseId);
+          const isPostMortemReview = phaseId ? phaseId === (toStringId(postMortemPhase.id) || toStringId((postMortemPhase as any).phaseId)) : false;
+          if (isPostMortemReview && (!resourceIds.length || (resId && resourceIds.includes(resId)))) {
+            pending.push(rev);
+          }
+        }
+
+        if (pending.length) {
+          // Load questions from scorecard
+          const scorecard = await TC.getScorecard(token, scorecardIdForPostMortem);
+          const groups = scorecard?.scorecardGroups || [];
+          const questions: any[] = [];
+          for (const g of groups) for (const s of (g.sections || [])) for (const q of (s.questions || [])) questions.push(q);
+          for (const rev of pending) {
+            const items = questions.map((q: any) => {
+              if (!q || q.id === undefined) return null;
+              const id = q.id;
+              if (q.type === 'YES_NO') {
+                return { scorecardQuestionId: id, initialAnswer: 'YES', reviewItemComments: [{ content: buildIterativeReviewComment('pass'), type: 'COMMENT', sortOrder: 1 }] };
+              }
+              if (q.type === 'SCALE') {
+                const min = typeof q.scaleMin === 'number' ? q.scaleMin : 0;
+                const max = typeof q.scaleMax === 'number' ? q.scaleMax : 100;
+                return { scorecardQuestionId: id, initialAnswer: String(Math.max(min, max)), reviewItemComments: [{ content: buildIterativeReviewComment('pass'), type: 'COMMENT', sortOrder: 1 }] };
+              }
+              return { scorecardQuestionId: id, initialAnswer: 'YES', reviewItemComments: [{ content: buildIterativeReviewComment('pass'), type: 'COMMENT', sortOrder: 1 }] };
+            }).filter(Boolean);
+            const payload = {
+              scorecardId: rev.scorecardId || scorecardIdForPostMortem,
+              typeId: rev.typeId || 'REVIEW',
+              metadata: rev.metadata || {},
+              status: 'COMPLETED',
+              reviewDate: dayjs().toISOString(),
+              committed: true,
+              reviewItems: items
+            };
+            try {
+              await TC.updateReview(token, String(rev.id), payload);
+              log.info('Post-mortem review completed', { reviewId: String(rev.id) });
+            } catch (e: any) {
+              log.warn('Failed to complete post-mortem review', { reviewId: String(rev.id), error: e?.message || String(e) });
+            }
+          }
+          log.info('Post-mortem step processed', { completed: pending.length });
+          return; // Done
+        }
+      } catch (e: any) {
+        log.warn('Error while processing post-mortem phase', { error: e?.message || String(e) });
+      }
+    }
+
+    await cancel.wait(5000);
+  }
+  log.warn('Post-mortem phase not detected or no pending reviews; continuing');
 }
 
 async function stepAwaitWinner(
@@ -1164,12 +1464,13 @@ async function stepAwaitWinner(
     const phases = Array.isArray(challenge?.phases) ? challenge.phases : [];
     const submissionPhase = phases.find((p: any) => p?.name === submissionPhaseName);
     const iterativePhaseOpen = phases.some((p: any) => p?.name === 'Iterative Review' && p.isOpen);
+    const postMortemOpen = phases.some((p: any) => typeof p?.name === 'string' && /post[- ]?mortem/i.test(p.name) && p.isOpen);
     const winnerHandles = Array.isArray(challenge?.winners)
       ? challenge.winners.map((w: any) => w?.handle).filter(Boolean)
       : [];
     const submissionClosed = submissionPhase ? submissionPhase.isOpen === false : false;
     const winnerAssigned = winnerHandles.includes(winningHandle);
-    if (submissionClosed && winnerAssigned && !iterativePhaseOpen) {
+    if (submissionClosed && winnerAssigned && !iterativePhaseOpen && !postMortemOpen) {
       log.info('Winner assigned and submission phase closed', { winner: winningHandle, submissionPhaseName }, getStepProgress('awaitWinner'));
       return challenge;
     }
@@ -1183,7 +1484,7 @@ export async function runFirst2FinishFlow(
   toStep: StepName | undefined,
   log: RunnerLogger,
   signal?: AbortSignal,
-  options?: { submissionPhaseName?: string }
+  options?: { submissionPhaseName?: string; lateSubmission?: boolean; enablePostMortem?: boolean }
 ) {
   const { writeLastRun, resetLastRun } = await import('../utils/lastRun.js');
   const cancel = createCancellationHelpers(signal, log);
@@ -1191,6 +1492,10 @@ export async function runFirst2FinishFlow(
   initializeStepStatuses(log);
 
   const submissionPhaseName = options?.submissionPhaseName ?? 'Submission';
+  const isTopgear = submissionPhaseName.trim().toLowerCase() === 'topgear submission';
+  const initialPerSubmitter = isTopgear ? 1 : INITIAL_SUBMISSIONS_PER_SUBMITTER;
+  const isLate = Boolean(options?.lateSubmission);
+  const postMortemEnabled = Boolean(options?.enablePostMortem);
 
   cancel.check();
   maybeStop(mode, toStep, 'token', log);
@@ -1216,15 +1521,25 @@ export async function runFirst2FinishFlow(
   const reviewer = await withStep(log, 'assignResources', () => stepAssignResources(log, token, cfg, challenge.id, cancel));
 
   maybeStop(mode, toStep, 'assignResources', log);
-  const submissionState = await withStep(log, 'loadInitialSubmissions', () => stepLoadInitialSubmissions(log, token, cfg, challenge.id, reviewer, cancel));
+  if (isTopgear && !isLate) {
+    await withStep(log, 'awaitSubmissionEnd', () => stepAwaitSubmissionScheduledEnd(log, token, challenge.id, cancel, submissionPhaseName));
+    maybeStop(mode, toStep, 'awaitSubmissionEnd', log);
+  }
+  const submissionState = await withStep(log, 'loadInitialSubmissions', () => stepLoadInitialSubmissions(log, token, cfg, challenge.id, reviewer, cancel, initialPerSubmitter));
 
   maybeStop(mode, toStep, 'loadInitialSubmissions', log);
-  const reviewState = await withStep(log, 'processReviews', () => stepProcessReviews(log, submissionState, cancel));
+  const reviewState = await withStep(log, 'processReviews', () => stepProcessReviews(log, submissionState, cancel, isTopgear));
 
   maybeStop(mode, toStep, 'processReviews', log);
-  const processResult = await withStep(log, 'finalSubmission', () => stepFinalizeSubmission(log, reviewState, cancel));
+  const processResult = await withStep(log, 'finalSubmission', () => stepFinalizeSubmission(log, reviewState, cancel, isLate, submissionPhaseName, token, challenge.id));
 
-  maybeStop(mode, toStep, 'finalSubmission', log);
+  if (postMortemEnabled) {
+    maybeStop(mode, toStep, 'finalSubmission', log);
+    await withStep(log, 'postMortem', () => stepPostMortem(log, token, challenge.id, cancel, postMortemEnabled, cfg.scorecardId, cfg.reviewer));
+    maybeStop(mode, toStep, 'postMortem', log);
+  }
+
+  maybeStop(mode, toStep, postMortemEnabled ? 'postMortem' : 'finalSubmission', log);
   await withStep(log, 'awaitWinner', () => stepAwaitWinner(log, token, challenge.id, processResult.winningSubmission.handle, cancel, submissionPhaseName));
 
   log.info('First2Finish flow complete', { challengeId: challenge.id }, 100);
