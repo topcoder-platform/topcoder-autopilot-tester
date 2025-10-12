@@ -652,7 +652,7 @@ async function stepUpdateDraft(
     trackId: cfg.challengeTrackId,
     name: `${cfg.challengeNamePrefix}${nanoid(6)}`,
     description: 'Design Challenge API Tester',
-    tags: [], groups: [], metadata: [],
+    tags: [], groups: [],
     startDate: nowIso,
     prizeSets: [
       { type: 'PLACEMENT', prizes: [
