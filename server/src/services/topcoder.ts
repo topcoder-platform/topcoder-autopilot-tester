@@ -228,7 +228,17 @@ export const TC = {
   },
   async listReviews(token: string, challengeId: string) {
     const ax = axiosWithAuth(token);
-    const { data } = await ax.get(`https://api.topcoder-dev.com/v6/reviews`, { params: { challengeId } });
+    const { data } = await ax.get(`https://api.topcoder-dev.com/v6/reviews`, {
+      params: {
+        challengeId,
+        perPage: 100
+      }
+    });
+    return data;
+  },
+  async listReviewTypes(token: string, params: { perPage?: number } = {}) {
+    const ax = axiosWithAuth(token);
+    const { data } = await ax.get(`https://api.topcoder-dev.com/v6/reviewTypes`, { params });
     return data;
   },
   async createAppeal(token: string, payload: any) {

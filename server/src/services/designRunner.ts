@@ -165,6 +165,113 @@ function toStringId(value: unknown) {
   return undefined;
 }
 
+type ReviewTypeRecord = {
+  id?: string;
+  name?: string;
+  isActive?: boolean;
+};
+
+let cachedReviewTypeLookup: Map<string, { id: string; name: string }> | null = null;
+let reviewTypeLookupPromise: Promise<Map<string, { id: string; name: string }>> | null = null;
+let reviewTypeLookupLogged = false;
+const missingReviewTypeWarnings = new Set<string>();
+
+function normalizeReviewTypeResponse(data: any): ReviewTypeRecord[] {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.result?.content)) return data.result.content;
+  if (Array.isArray(data?.content)) return data.content;
+  if (Array.isArray(data?.result?.data)) return data.result.data;
+  if (Array.isArray(data?.data)) return data.data;
+  return [];
+}
+
+async function loadActiveReviewTypeLookup(
+  log: RunnerLogger,
+  token: string,
+  cancel: CancellationHelpers
+): Promise<Map<string, { id: string; name: string }>> {
+  if (cachedReviewTypeLookup) return cachedReviewTypeLookup;
+  if (reviewTypeLookupPromise) return reviewTypeLookupPromise;
+
+  reviewTypeLookupPromise = (async () => {
+    const attempts = 3;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      cancel.check();
+      try {
+        if (attempt === 0 && !reviewTypeLookupLogged) {
+          log.info('Loading review types from API...');
+        }
+        const response = await TC.listReviewTypes(token, { perPage: 100 });
+        cancel.check();
+        const normalized = normalizeReviewTypeResponse(response);
+        const lookup = new Map<string, { id: string; name: string }>();
+        for (const item of normalized) {
+          if (!item || item.isActive !== true) continue;
+          const name = typeof item.name === 'string' ? item.name.trim() : '';
+          const id = toStringId(item.id);
+          if (!name || !id) continue;
+          const key = name.toLowerCase();
+          if (!lookup.has(key)) lookup.set(key, { id, name });
+        }
+        if (!reviewTypeLookupLogged) {
+          log.info('Active review types loaded', { count: lookup.size });
+          reviewTypeLookupLogged = true;
+        }
+        cachedReviewTypeLookup = lookup;
+        return lookup;
+      } catch (error: any) {
+        log.warn('Failed to load review types', {
+          attempt: attempt + 1,
+          error: error?.message || String(error)
+        });
+      }
+      if (attempt < attempts - 1) await cancel.wait(500);
+    }
+    cachedReviewTypeLookup = new Map();
+    return cachedReviewTypeLookup;
+  })();
+
+  try {
+    return await reviewTypeLookupPromise;
+  } finally {
+    reviewTypeLookupPromise = null;
+  }
+}
+
+async function resolveReviewTypeIdForPhase(
+  log: RunnerLogger,
+  token: string,
+  cancel: CancellationHelpers,
+  phaseNameHints: string[]
+): Promise<string | undefined> {
+  const candidates = phaseNameHints
+    .map(name => (typeof name === 'string' ? name.trim() : ''))
+    .filter(Boolean);
+  if (!candidates.length) return undefined;
+
+  const lookup = await loadActiveReviewTypeLookup(log, token, cancel);
+  for (const candidate of candidates) {
+    const entry = lookup.get(candidate.toLowerCase());
+    if (entry) return entry.id;
+  }
+
+  const key = candidates.map(c => c.toLowerCase()).join('|') || '::none';
+  if (!missingReviewTypeWarnings.has(key)) {
+    const hasEntries = lookup.size > 0;
+    log.warn(
+      hasEntries
+        ? 'No matching active review type found for phase names'
+        : 'No active review types available to match phase names',
+      {
+        phaseCandidates: candidates,
+        activeReviewTypeNames: hasEntries ? Array.from(lookup.values()).map(entry => entry.name) : []
+      }
+    );
+    missingReviewTypeWarnings.add(key);
+  }
+  return undefined;
+}
+
 async function resolvePhaseIdByName(
   log: RunnerLogger,
   token: string,
@@ -345,6 +452,7 @@ export async function runDesignFlow(
     cfg.checkpointScreeningScorecardId || cfg.screeningScorecardId || cfg.scorecardId,
     cfg.checkpointScreener || cfg.screener || cfg.screeningReviewer || cfg.reviewer,
     'checkpointSubmissions',
+    ['Checkpoint Screening'],
     cancel
   ));
   maybeStop(mode, toStep, 'createCheckpointScreeningReviews', log);
@@ -361,6 +469,7 @@ export async function runDesignFlow(
     cfg.checkpointReviewScorecardId || cfg.checkpointScorecardId,
     cfg.checkpointReviewer || cfg.reviewer,
     'checkpointSubmissions',
+    ['Checkpoint Review'],
     cancel
   ));
   maybeStop(mode, toStep, 'createCheckpointReviews', log);
@@ -383,6 +492,7 @@ export async function runDesignFlow(
     cfg.screeningScorecardId || cfg.scorecardId,
     cfg.screener || cfg.screeningReviewer || cfg.reviewer,
     'submissions',
+    ['Screening'],
     cancel
   ));
   maybeStop(mode, toStep, 'createScreeningReviews', log);
@@ -399,6 +509,7 @@ export async function runDesignFlow(
     cfg.reviewScorecardId || cfg.scorecardId,
     cfg.reviewer,
     'submissions',
+    ['Iterative Review', 'Review'],
     cancel
   ));
   maybeStop(mode, toStep, 'createReviews', log);
@@ -444,6 +555,12 @@ async function stepCreateChallenge(
     description: 'Design Challenge end-to-end test',
     discussions: [
       { name: `${challengeName} Discussion`, type: 'CHALLENGE', provider: 'vanilla' }
+    ],
+    metadata: [
+      {
+        name: 'submissionLimit',
+        value: '{"unlimited":"true","limit":"false","count":""}'
+      }
     ]
   };
   const ch = await TC.createChallenge(token, payload);
@@ -941,6 +1058,7 @@ async function stepPatchPendingReviews(
   scorecardIdForQuestions: string,
   reviewerHandle: string,
   submissionMapKey: 'submissions' | 'checkpointSubmissions',
+  phaseNameHints: string[] = [],
   cancel: CancellationHelpers
 ) {
   const { readLastRun, writeLastRun } = await import('../utils/lastRun.js');
@@ -974,6 +1092,17 @@ async function stepPatchPendingReviews(
   const submissionsMap: Record<string, string[]> = (lr as any)[submissionMapKey] || {};
   const handles = Object.keys(submissionsMap);
   const expectedCount = handles.reduce((acc, h) => acc + ((submissionsMap[h] || []).length), 0);
+
+  const phaseHints = Array.isArray(phaseNameHints) ? phaseNameHints : [];
+  let fallbackReviewTypeId: string | undefined;
+  let fallbackReviewTypeIdResolved = phaseHints.length === 0;
+  let defaultFallbackWarned = false;
+  const ensureFallbackReviewTypeId = async () => {
+    if (fallbackReviewTypeIdResolved) return fallbackReviewTypeId;
+    fallbackReviewTypeId = await resolveReviewTypeIdForPhase(log, token, cancel, phaseHints);
+    fallbackReviewTypeIdResolved = true;
+    return fallbackReviewTypeId;
+  };
 
   // Poll briefly for Autopilot to create pending reviews if they haven't appeared yet
   let pendingByKey = new Map<string, any>();
@@ -1077,13 +1206,32 @@ async function stepPatchPendingReviews(
 
       const payload = {
         scorecardId: pending?.scorecardId || scorecardIdForQuestions,
-        typeId: pending?.typeId || 'REVIEW',
+        typeId: (() => {
+          const existing = toStringId((pending as any)?.typeId);
+          return existing ?? '';
+        })(),
         metadata: pending?.metadata || {},
         status: 'COMPLETED',
         reviewDate: dayjs().toISOString(),
         committed: true,
         reviewItems
       };
+      if (!payload.typeId) {
+        const resolvedTypeId = await ensureFallbackReviewTypeId();
+        if (resolvedTypeId) {
+          payload.typeId = resolvedTypeId;
+        } else {
+          payload.typeId = 'REVIEW';
+          if (!defaultFallbackWarned && phaseHints.length) {
+            const reviewId = toStringId((pending as any)?.id);
+            log.warn('Falling back to default review type ID for review', {
+              reviewId,
+              phaseHints
+            });
+            defaultFallbackWarned = true;
+          }
+        }
+      }
       try {
         log.info('REQ patchReview', { reviewId: String(pending.id), payload });
         const r = await TC.updateReview(token, String(pending.id), payload);
@@ -1156,9 +1304,25 @@ async function patchAnyPendingApproval(
     return { scorecardQuestionId: q.id, initialAnswer: pass ? 'YES' : 'NO', reviewItemComments: [{ content: buildMarkdownReviewItemComment(q, pass ? 'YES' : 'NO'), type: 'COMMENT', sortOrder: 1 }] };
   });
 
+  const existingTypeId = toStringId((target as any)?.typeId);
+  let approvalTypeId = existingTypeId;
+  if (!approvalTypeId) {
+    const resolved = await resolveReviewTypeIdForPhase(log, token, cancel, ['Approval']);
+    if (resolved) {
+      approvalTypeId = resolved;
+    } else {
+      approvalTypeId = 'REVIEW';
+      const reviewId = toStringId((target as any)?.id);
+      log.warn('Falling back to default review type ID for approval review', {
+        reviewId,
+        phaseHints: ['Approval']
+      });
+    }
+  }
+
   const payload = {
     scorecardId: scorecardId,
-    typeId: target?.typeId || 'REVIEW',
+    typeId: approvalTypeId,
     metadata: target?.metadata || {},
     status: 'COMPLETED',
     reviewDate: dayjs().toISOString(),
