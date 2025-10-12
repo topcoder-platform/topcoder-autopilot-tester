@@ -1092,6 +1092,17 @@ async function stepPatchPendingReviews(
   const submissionsMap: Record<string, string[]> = (lr as any)[submissionMapKey] || {};
   const handles = Object.keys(submissionsMap);
   const expectedCount = handles.reduce((acc, h) => acc + ((submissionsMap[h] || []).length), 0);
+  const ensureCheckpointFailure = progressStep === 'createCheckpointScreeningReviews';
+  const checkpointFailureSet = new Set<string>();
+  if (ensureCheckpointFailure) {
+    for (const handle of handles) {
+      const perHandle = submissionsMap[handle] || [];
+      if (perHandle.length) {
+        // Intentionally fail the first submission for each handle.
+        checkpointFailureSet.add(String(perHandle[0]));
+      }
+    }
+  }
 
   const phaseHints = Array.isArray(phaseNameHints) ? phaseNameHints : [];
   let fallbackReviewTypeId: string | undefined;
@@ -1164,6 +1175,9 @@ async function stepPatchPendingReviews(
         if (bucket.length === 1) pending = bucket[0];
       }
       if (!pending) continue;
+      const shouldFail = ensureCheckpointFailure && checkpointFailureSet.has(String(subId));
+      const outcomeLabel = shouldFail ? 'fail' : 'pass';
+      const scoreForOutcome = shouldFail ? 10 : 100;
       const existingItems = Array.isArray(pending.reviewItems) ? pending.reviewItems : [];
       const itemsByQuestion = new Map<string, any>(existingItems
         .filter((item: any) => item && item.scorecardQuestionId !== undefined)
@@ -1172,7 +1186,9 @@ async function stepPatchPendingReviews(
       const reviewItems = questions.map(q => {
         if (q.type === 'YES_NO') {
           const existingItem = itemsByQuestion.get(String(q.id));
-          const answer = randPick(['YES', 'NO']);
+          const answer = ensureCheckpointFailure
+            ? (shouldFail ? 'NO' : 'YES')
+            : randPick(['YES', 'NO']);
           const payload: any = {
             scorecardQuestionId: q.id,
             initialAnswer: answer,
@@ -1184,7 +1200,9 @@ async function stepPatchPendingReviews(
           const existingItem = itemsByQuestion.get(String(q.id));
           const min = typeof q.scaleMin === 'number' ? q.scaleMin : 1;
           const max = typeof q.scaleMax === 'number' ? q.scaleMax : 10;
-          const value = String(randInt(min, max));
+          const value = ensureCheckpointFailure
+            ? String(shouldFail ? min : max)
+            : String(randInt(min, max));
           const payload: any = {
             scorecardQuestionId: q.id,
             initialAnswer: value,
@@ -1194,15 +1212,26 @@ async function stepPatchPendingReviews(
           return payload;
         } else {
           const existingItem = itemsByQuestion.get(String(q.id));
+          const answer = ensureCheckpointFailure
+            ? (shouldFail ? 'NO' : 'YES')
+            : 'YES';
           const payload: any = {
             scorecardQuestionId: q.id,
-            initialAnswer: 'YES',
-            reviewItemComments: [{ content: buildMarkdownReviewItemComment(q, 'YES'), type: 'COMMENT', sortOrder: 1 }]
+            initialAnswer: answer,
+            reviewItemComments: [{ content: buildMarkdownReviewItemComment(q, answer), type: 'COMMENT', sortOrder: 1 }]
           };
           if (existingItem?.id !== undefined) payload.id = existingItem.id;
           return payload;
         }
       });
+      const rawMetadata = pending?.metadata;
+      const metadata = ensureCheckpointFailure
+        ? {
+            ...(typeof rawMetadata === 'object' && rawMetadata !== null ? { ...(rawMetadata as any) } : {}),
+            outcome: outcomeLabel,
+            score: scoreForOutcome
+          }
+        : (rawMetadata || {});
 
       const payload = {
         scorecardId: pending?.scorecardId || scorecardIdForQuestions,
@@ -1210,12 +1239,16 @@ async function stepPatchPendingReviews(
           const existing = toStringId((pending as any)?.typeId);
           return existing ?? '';
         })(),
-        metadata: pending?.metadata || {},
+        metadata,
         status: 'COMPLETED',
         reviewDate: dayjs().toISOString(),
         committed: true,
         reviewItems
       };
+      if (ensureCheckpointFailure) {
+        (payload as any).score = scoreForOutcome;
+        (payload as any).isPassing = !shouldFail;
+      }
       if (!payload.typeId) {
         const resolvedTypeId = await ensureFallbackReviewTypeId();
         if (resolvedTypeId) {
