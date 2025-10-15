@@ -594,8 +594,8 @@ async function stepUpdateDraft(
       isMemberReview: true,
       memberReviewerCount: 1,
       phaseId: reviewPhaseId,
-      basePayment: 50,
-      incrementalPayment: 20,
+      baseCoefficient: 0.13,
+      incrementalCoefficient: 0.2,
       type: 'REGULAR_REVIEW'
     });
   }
@@ -605,8 +605,8 @@ async function stepUpdateDraft(
       isMemberReview: true,
       memberReviewerCount: 1,
       phaseId: checkpointReviewPhaseId,
-      basePayment: 50,
-      incrementalPayment: 20,
+      baseCoefficient: 0.13,
+      incrementalCoefficient: 0.2,
       type: 'REGULAR_REVIEW'
     });
   }
@@ -616,8 +616,8 @@ async function stepUpdateDraft(
       isMemberReview: true,
       memberReviewerCount: 1,
       phaseId: checkpointScreeningPhaseId,
-      basePayment: 30,
-      incrementalPayment: 10,
+      baseCoefficient: 0.13,
+      incrementalCoefficient: 0.1,
       type: 'REGULAR_REVIEW'
     });
   }
@@ -627,8 +627,8 @@ async function stepUpdateDraft(
       isMemberReview: true,
       memberReviewerCount: 1,
       phaseId: screeningPhaseId,
-      basePayment: 30,
-      incrementalPayment: 10,
+      baseCoefficient: 0.13,
+      incrementalCoefficient: 0.1,
       type: 'REGULAR_REVIEW'
     });
   }
@@ -638,8 +638,8 @@ async function stepUpdateDraft(
       isMemberReview: true,
       memberReviewerCount: 1,
       phaseId: approvalPhaseId,
-      basePayment: 30,
-      incrementalPayment: 10,
+      baseCoefficient: 0.13,
+      incrementalCoefficient: 0.1,
       type: 'REGULAR_REVIEW'
     });
   }
