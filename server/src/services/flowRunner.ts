@@ -79,8 +79,8 @@ function maybeStop(mode: RunMode, toStep: StepName|undefined, current: StepName,
 }
 
 const DEFAULT_REVIEW_PHASE_ID = 'aa5a3f78-79e0-4bf7-93ff-b11e8f5b398b';
-const DEFAULT_REVIEWER_BASE_PAYMENT = 50;
-const DEFAULT_REVIEWER_INCREMENTAL_PAYMENT = 20;
+const DEFAULT_REVIEWER_BASE_COEFFICIENT = 0.5;
+const DEFAULT_REVIEWER_INCREMENTAL_COEFFICIENT = 0.2;
 
 const STEPS: StepName[] = [
   'token','createChallenge','updateDraft','activate',
@@ -439,8 +439,9 @@ async function stepUpdateDraft(
         isMemberReview: true,
         memberReviewerCount: reviewerCount,
         phaseId: reviewPhaseId,
-        basePayment: DEFAULT_REVIEWER_BASE_PAYMENT,
-        incrementalPayment: DEFAULT_REVIEWER_INCREMENTAL_PAYMENT,
+        fixedAmount: 0,
+        baseCoefficient: DEFAULT_REVIEWER_BASE_COEFFICIENT,
+        incrementalCoefficient: DEFAULT_REVIEWER_INCREMENTAL_COEFFICIENT,
         type: 'REGULAR_REVIEW'
       }
     ],

@@ -384,8 +384,9 @@ async function stepUpdateDraft(
         isMemberReview: true,
         memberReviewerCount: 1,
         phaseId: ITERATIVE_REVIEW_PHASE_ID,
-        basePayment: 10,
-        incrementalPayment: 10,
+        fixedAmount: 0,
+        baseCoefficient: 0.1,
+        incrementalCoefficient: 0.1,
         type: 'ITERATIVE_REVIEW'
       }
     ],
