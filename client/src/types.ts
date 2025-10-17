@@ -1,4 +1,4 @@
-export type FlowVariant = 'full' | 'first2finish' | 'topgear' | 'topgearLate' | 'design';
+export type FlowVariant = 'full' | 'first2finish' | 'topgear' | 'topgearLate' | 'design' | 'designSingle';
 
 export type PrizeTuple = [number, number, number];
 
@@ -39,6 +39,7 @@ export type AppConfig = {
   first2finish: First2FinishConfig;
   topgear: TopgearConfig;
   designChallenge: DesignConfig;
+  designSingleChallenge: FullChallengeConfig;
 };
 
 export type FlowStep = {

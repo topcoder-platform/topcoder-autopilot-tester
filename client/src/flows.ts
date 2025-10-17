@@ -51,6 +51,24 @@ const topgearLateSteps: FlowStep[] = [
   { id: 'awaitWinner', label: 'Await Winner' }
 ];
 
+const designSingleSteps: FlowStep[] = [
+  { id: 'token', label: 'Token' },
+  { id: 'createChallenge', label: 'Create Challenge' },
+  { id: 'updateDraft', label: 'Update Draft' },
+  { id: 'activate', label: 'Activate' },
+  { id: 'awaitRegSubOpen', label: 'Await Reg/Sub Open' },
+  { id: 'assignResources', label: 'Assign Resources' },
+  { id: 'createSubmissions', label: 'Create Submissions' },
+  { id: 'awaitScreeningOpen', label: 'Await Screening Open' },
+  { id: 'createScreeningReviews', label: 'Complete Screening Reviews' },
+  { id: 'awaitReviewOpen', label: 'Await Review Open' },
+  { id: 'createReviews', label: 'Create Reviews' },
+  { id: 'awaitApprovalOpen', label: 'Await Approval Open' },
+  { id: 'createApprovalReview', label: 'Complete Approval Review' },
+  { id: 'awaitAllClosed', label: 'Await All Closed' },
+  { id: 'awaitCompletion', label: 'Await Completion' }
+];
+
 export const FLOW_DEFINITIONS: Record<FlowVariant, FlowDefinition> = {
   full: {
     key: 'full',
@@ -86,6 +104,12 @@ export const FLOW_DEFINITIONS: Record<FlowVariant, FlowDefinition> = {
     ],
     defaultToStep: 'activate'
   },
+  designSingle: {
+    key: 'designSingle',
+    tabLabel: 'Design Challenge - Single',
+    steps: designSingleSteps,
+    defaultToStep: 'activate'
+  },
   first2finish: {
     key: 'first2finish',
     tabLabel: 'First2Finish',
@@ -118,4 +142,4 @@ export const FLOW_DEFINITIONS: Record<FlowVariant, FlowDefinition> = {
   }
 };
 
-export const ORDERED_FLOW_KEYS: FlowVariant[] = ['full', 'design', 'first2finish', 'topgear', 'topgearLate'];
+export const ORDERED_FLOW_KEYS: FlowVariant[] = ['full', 'design', 'designSingle', 'first2finish', 'topgear', 'topgearLate'];

@@ -70,8 +70,17 @@ export type StepName =
   | 'createAppeals' | 'awaitAppealsResponseOpen' | 'appealResponses'
   | 'awaitAllClosed' | 'awaitCompletion';
 
+export type DesignSingleStepName =
+  | 'token' | 'createChallenge' | 'updateDraft' | 'activate'
+  | 'awaitRegSubOpen' | 'assignResources' | 'createSubmissions'
+  | 'awaitScreeningOpen' | 'createScreeningReviews'
+  | 'awaitReviewOpen' | 'createReviews'
+  | 'awaitApprovalOpen' | 'createApprovalReview'
+  | 'awaitAllClosed' | 'awaitCompletion';
 
-function maybeStop(mode: RunMode, toStep: StepName|undefined, current: StepName, log: RunnerLogger) {
+type AnyStepName = StepName | DesignSingleStepName;
+
+function maybeStop(mode: RunMode, toStep: AnyStepName | undefined, current: AnyStepName, log: RunnerLogger) {
   if (mode === 'toStep' && toStep === current) {
     log.info(`Stopping at step '${current}' as requested`, { step: current }, 100);
     throw new Error('__STOP_EARLY__');
@@ -90,12 +99,29 @@ const STEPS: StepName[] = [
   'awaitAllClosed','awaitCompletion'
 ];
 
-const PROGRESS_STEPS: StepName[] = STEPS.filter(step => step !== 'token');
+const DESIGN_SINGLE_STEPS: DesignSingleStepName[] = [
+  'token', 'createChallenge', 'updateDraft', 'activate',
+  'awaitRegSubOpen', 'assignResources', 'createSubmissions',
+  'awaitScreeningOpen', 'createScreeningReviews',
+  'awaitReviewOpen', 'createReviews',
+  'awaitApprovalOpen', 'createApprovalReview',
+  'awaitAllClosed', 'awaitCompletion'
+];
 
-function getStepProgress(step: StepName): number | undefined {
-  const idx = PROGRESS_STEPS.indexOf(step);
+const PROGRESS_STEPS: AnyStepName[] = STEPS.filter(step => step !== 'token');
+
+let activeSteps: AnyStepName[] = [...STEPS];
+let activeProgressSteps: AnyStepName[] = [...PROGRESS_STEPS];
+
+function setActiveSteps(steps: AnyStepName[]) {
+  activeSteps = [...steps];
+  activeProgressSteps = steps.filter(step => step !== 'token');
+}
+
+function getStepProgress(step: AnyStepName): number | undefined {
+  const idx = activeProgressSteps.indexOf(step);
   if (idx === -1) return undefined;
-  const value = ((idx + 1) / PROGRESS_STEPS.length) * 100;
+  const value = ((idx + 1) / activeProgressSteps.length) * 100;
   return Number(value.toFixed(2));
 }
 
@@ -112,7 +138,7 @@ type StepContext = {
 };
 
 function initializeStepStatuses(log: RunnerLogger) {
-  for (const step of STEPS) {
+  for (const step of activeSteps) {
     log.step({ step, status: 'pending' });
   }
 }
@@ -201,7 +227,7 @@ async function resolvePhaseIdByName(
 
 async function withStep<T>(
   log: RunnerLogger,
-  step: StepName,
+  step: AnyStepName,
   runner: (ctx: StepContext) => Promise<T>
 ): Promise<T> {
   const requests: StepRequestLog[] = [];
@@ -310,6 +336,7 @@ export async function runFlow(
   const { writeLastRun, resetLastRun } = await import('../utils/lastRun.js');
   const cancel = createCancellationHelpers(signal, log);
 
+  setActiveSteps(STEPS);
   resetLastRun();
   initializeStepStatuses(log);
 
@@ -360,6 +387,129 @@ export async function runFlow(
   await withStep(log, 'awaitCompletion', (ctx) => stepAwaitCompletion(log, token, challenge.id, cancel, ctx));
 
   log.info('Flow complete', { challengeId: challenge.id }, 100);
+}
+
+export async function runDesignSingleFlow(
+  cfg: FlowConfig,
+  mode: RunMode,
+  toStep: DesignSingleStepName | undefined,
+  log: RunnerLogger,
+  signal?: AbortSignal
+) {
+  const { writeLastRun, resetLastRun } = await import('../utils/lastRun.js');
+  const cancel = createCancellationHelpers(signal, log);
+
+  setActiveSteps(DESIGN_SINGLE_STEPS);
+  resetLastRun();
+  initializeStepStatuses(log);
+
+  cancel.check();
+  maybeStop(mode, toStep, 'token', log);
+  const token = await withStep(log, 'token', (ctx) => stepToken(log, cancel, ctx));
+  cancel.check();
+  maybeStop(mode, toStep, 'token', log);
+  const challenge = await withStep(log, 'createChallenge', (ctx) => stepCreateChallenge(log, token, cfg, cancel, ctx));
+  writeLastRun({ challengeId: challenge.id, challengeName: challenge.name });
+  cancel.check();
+  maybeStop(mode, toStep, 'createChallenge', log);
+  await withStep(log, 'updateDraft', (ctx) => stepUpdateDraftDesignSingle(log, token, cfg, challenge.id, cancel, ctx));
+  maybeStop(mode, toStep, 'updateDraft', log);
+  cancel.check();
+  await withStep(log, 'activate', (ctx) => stepActivate(log, token, challenge.id, cancel, ctx));
+  maybeStop(mode, toStep, 'activate', log);
+
+  await withStep(
+    log,
+    'awaitRegSubOpen',
+    (ctx) => stepAwaitPhasesOpen(
+      log,
+      token,
+      challenge.id,
+      ['Registration', 'Submission'],
+      'awaitRegSubOpen',
+      [],
+      cancel,
+      ctx
+    )
+  );
+  maybeStop(mode, toStep, 'awaitRegSubOpen', log);
+  cancel.check();
+  const approverHandle = cfg.reviewers[0] ?? cfg.copilotHandle ?? cfg.screener;
+  const extraAssignments = approverHandle
+    ? [{ roleName: 'Approver', handle: approverHandle }]
+    : [];
+  await withStep(
+    log,
+    'assignResources',
+    (ctx) => stepAssignResources(log, token, cfg, challenge.id, cancel, ctx, extraAssignments)
+  );
+  maybeStop(mode, toStep, 'assignResources', log);
+  cancel.check();
+  await withStep(log, 'createSubmissions', (ctx) => stepCreateSubmissions(log, token, cfg, challenge.id, cancel, ctx));
+  maybeStop(mode, toStep, 'createSubmissions', log);
+
+  await withStep(
+    log,
+    'awaitScreeningOpen',
+    (ctx) => stepAwaitPhasesOpen(
+      log,
+      token,
+      challenge.id,
+      ['Screening'],
+      'awaitScreeningOpen',
+      ['Submission'],
+      cancel,
+      ctx
+    )
+  );
+  maybeStop(mode, toStep, 'awaitScreeningOpen', log);
+  cancel.check();
+  await withStep(log, 'createScreeningReviews', (ctx) => stepCreateScreeningReviews(log, token, cfg, challenge.id, cancel, ctx));
+  maybeStop(mode, toStep, 'createScreeningReviews', log);
+
+  await withStep(
+    log,
+    'awaitReviewOpen',
+    (ctx) => stepAwaitPhasesOpen(
+      log,
+      token,
+      challenge.id,
+      ['Review'],
+      'awaitReviewOpen',
+      ['Screening'],
+      cancel,
+      ctx
+    )
+  );
+  maybeStop(mode, toStep, 'awaitReviewOpen', log);
+  cancel.check();
+  await withStep(log, 'createReviews', (ctx) => stepCreateReviews(log, token, cfg, challenge.id, cancel, ctx));
+  maybeStop(mode, toStep, 'createReviews', log);
+
+  await withStep(
+    log,
+    'awaitApprovalOpen',
+    (ctx) => stepAwaitPhasesOpen(
+      log,
+      token,
+      challenge.id,
+      ['Approval'],
+      'awaitApprovalOpen',
+      ['Review'],
+      cancel,
+      ctx
+    )
+  );
+  maybeStop(mode, toStep, 'awaitApprovalOpen', log);
+  cancel.check();
+  await withStep(log, 'createApprovalReview', (ctx) => stepApprovalFlowDesignSingle(log, token, cfg, challenge.id, cancel, ctx));
+  maybeStop(mode, toStep, 'createApprovalReview', log);
+
+  await withStep(log, 'awaitAllClosed', (ctx) => stepAwaitAllClosed(log, token, challenge.id, cancel, ctx));
+  maybeStop(mode, toStep, 'awaitAllClosed', log);
+  await withStep(log, 'awaitCompletion', (ctx) => stepAwaitCompletion(log, token, challenge.id, cancel, ctx));
+
+  log.info('Design Single flow complete', { challengeId: challenge.id }, 100);
 }
 
 async function stepToken(log: RunnerLogger, cancel: CancellationHelpers, ctx?: StepContext) {
@@ -472,6 +622,122 @@ async function stepUpdateDraft(
   return updated;
 }
 
+async function stepUpdateDraftDesignSingle(
+  log: RunnerLogger,
+  token: string,
+  cfg: FlowConfig,
+  challengeId: string,
+  cancel: CancellationHelpers,
+  ctx?: StepContext
+) {
+  cancel.check();
+  log.info('Updating challenge to DRAFT with screening and approval reviewers...');
+  const reviewerCount = Math.max(Array.isArray(cfg.reviewers) ? cfg.reviewers.length : 0, 1);
+  const reviewPhaseId = await resolvePhaseIdByName(log, token, challengeId, 'Review', cancel) ?? DEFAULT_REVIEW_PHASE_ID;
+  const screeningPhaseId = await resolvePhaseIdByName(log, token, challengeId, 'Screening', cancel);
+  const approvalPhaseId = await resolvePhaseIdByName(log, token, challengeId, 'Approval', cancel);
+  const nowIso = dayjs().toISOString();
+
+  const reviewers: any[] = [];
+  if (reviewPhaseId) {
+    reviewers.push({
+      scorecardId: cfg.scorecardId,
+      isMemberReview: true,
+      memberReviewerCount: reviewerCount,
+      phaseId: reviewPhaseId,
+      fixedAmount: 0,
+      baseCoefficient: DEFAULT_REVIEWER_BASE_COEFFICIENT,
+      incrementalCoefficient: DEFAULT_REVIEWER_INCREMENTAL_COEFFICIENT,
+      type: 'REGULAR_REVIEW'
+    });
+  }
+  if (screeningPhaseId) {
+    reviewers.push({
+      scorecardId: cfg.scorecardId,
+      isMemberReview: true,
+      memberReviewerCount: 1,
+      phaseId: screeningPhaseId,
+      fixedAmount: 0,
+      baseCoefficient: 0.13,
+      incrementalCoefficient: 0.1,
+      type: 'REGULAR_REVIEW'
+    });
+  }
+  if (approvalPhaseId) {
+    reviewers.push({
+      scorecardId: cfg.scorecardId,
+      isMemberReview: true,
+      memberReviewerCount: 1,
+      phaseId: approvalPhaseId,
+      fixedAmount: 0,
+      baseCoefficient: 0.13,
+      incrementalCoefficient: 0.1,
+      type: 'REGULAR_REVIEW'
+    });
+  }
+
+  await sanityCheckReviewerPhaseTemplates(log, token, challengeId, reviewers, cancel);
+
+  const body = {
+    typeId: cfg.challengeTypeId,
+    trackId: cfg.challengeTrackId,
+    name: `${cfg.challengeNamePrefix}${nanoid(6)}`,
+    description: 'Design Single Challenge API Tester',
+    tags: [],
+    groups: [],
+    metadata: [
+      {
+        name: 'submissionLimit',
+        value: '{"unlimited":"true","limit":"false","count":""}'
+      }
+    ],
+    startDate: nowIso,
+    prizeSets: [
+      {
+        type: 'PLACEMENT',
+        prizes: [
+          { type: 'USD', value: cfg.prizes[0] },
+          { type: 'USD', value: cfg.prizes[1] },
+          { type: 'USD', value: cfg.prizes[2] }
+        ]
+      },
+      { type: 'COPILOT', prizes: [{ type: 'USD', value: 100 }] }
+    ],
+    winners: [],
+    discussions: [],
+    reviewers,
+    task: { isTask: false, isAssigned: false },
+    skills: [{ name: 'Design', id: '63bb7cfc-b0d4-4584-820a-18c503b4b0fe' }],
+    legacy: {
+      reviewType: 'COMMUNITY',
+      confidentialityType: 'public',
+      directProjectId: 33540,
+      isTask: false,
+      useSchedulingAPI: false,
+      pureV5Task: false,
+      pureV5: false,
+      selfService: false
+    },
+    timelineTemplateId: cfg.timelineTemplateId,
+    projectId: cfg.projectId,
+    status: 'DRAFT',
+    attachmentIds: []
+  };
+
+  const updated = await TC.updateChallenge(token, challengeId, body);
+  cancel.check();
+  log.info('Challenge updated to DRAFT (design single)', { challengeId, request: body }, getStepProgress('updateDraft'));
+  log.info('Configured review settings (design single)', {
+    challengeId,
+    reviewPhaseId,
+    screeningPhaseId,
+    approvalPhaseId,
+    reviewerCount,
+    scorecardId: cfg.scorecardId
+  });
+  return updated;
+}
+
 async function sanityCheckReviewerPhaseTemplates(
   log: RunnerLogger,
   token: string,
@@ -549,7 +815,7 @@ async function stepAwaitPhasesOpen(
   token: string,
   challengeId: string,
   mustOpen: string[],
-  progressStep: StepName,
+  progressStep: AnyStepName,
   mustClose: string[] = [],
   cancel?: CancellationHelpers,
   ctx?: StepContext
@@ -594,107 +860,106 @@ async function stepAssignResources(
   cfg: FlowConfig,
   challengeId: string,
   cancel: CancellationHelpers,
-  ctx?: StepContext
+  ctx?: StepContext,
+  extraAssignments: Array<{ roleName: string; handle: string }> = []
 ) {
   cancel.check();
-  log.info('Assigning resources (copilot, screener, reviewers, submitters)...');
+  const extrasSummary = extraAssignments.length
+    ? ` + extra roles (${extraAssignments.map(e => `${e.roleName}:${e.handle}`).join(', ')})`
+    : '';
+  log.info(`Assigning resources (copilot, screener, reviewers, submitters${extrasSummary})...`);
   const { readLastRun, writeLastRun } = await import('../utils/lastRun.js');
   const lr = readLastRun();
   const reviewerResources = { ...(lr.reviewerResources || {}) } as Record<string, string>;
   let reviewerResourcesChanged = false;
   let challengeResources: { id: string; memberId?: string; memberHandle?: string; roleId?: string }[] | undefined;
-  log.info('REQ listResourceRoles');
+
   log.info('REQ listResourceRoles');
   const roles = await TC.listResourceRoles(token);
   cancel.check();
   log.info('RES listResourceRoles', { count: roles.length });
-  log.info('RES listResourceRoles', { count: roles.length });
-  log.info('Fetched resource roles', { count: Array.isArray(roles)? roles.length : 0 });
-  const roleIdByName: Record<string,string> = {};
-  for (const r of roles) roleIdByName[r.name] = r.id;
+
+  const roleIdByName: Record<string, string> = {};
+  const roleNameById: Record<string, string> = {};
+  for (const r of roles) {
+    if (!r || typeof r.name !== 'string' || !r.id) continue;
+    roleIdByName[r.name] = r.id;
+    roleNameById[r.id] = r.name;
+  }
+
   const need = {
     Submitter: roleIdByName['Submitter'],
     Reviewer: roleIdByName['Reviewer'],
     Copilot: roleIdByName['Copilot'],
-    Screener: roleIdByName['Screener']
+    Screener: roleIdByName['Screener'],
+    Approver: roleIdByName['Approver']
   };
   if (!need.Submitter || !need.Reviewer || !need.Copilot || !need.Screener) {
     log.warn('Could not find one or more required resource role IDs', need);
   }
-  // Copilot
-  if (cfg.copilotHandle) {
+
+  const addResourceSafe = async (handle: string, roleId: string, roleLabel: string) => {
     cancel.check();
-    log.info('REQ getMemberByHandle', { handle: cfg.copilotHandle });
-    const mem = await TC.getMemberByHandle(token, cfg.copilotHandle);
+    log.info('REQ getMemberByHandle', { handle });
+    const mem = await TC.getMemberByHandle(token, handle);
     cancel.check();
-    log.info('RES getMemberByHandle', { handle: cfg.copilotHandle, userId: mem.userId });
-    const payload = { challengeId, memberId: String(mem.userId), roleId: need.Copilot };
-    log.info('REQ addResource', payload);
-    await TC.addResource(token, payload);
-    cancel.check();
-    log.info('RES addResource', { ok: true });
-    log.info('Added copilot', { handle: cfg.copilotHandle });
-  }
-  // Screener
-  if (cfg.screener && need.Screener) {
-    cancel.check();
-    log.info('REQ getMemberByHandle', { handle: cfg.screener });
-    const mem = await TC.getMemberByHandle(token, cfg.screener);
-    cancel.check();
-    log.info('RES getMemberByHandle', { handle: cfg.screener, userId: mem.userId });
-    const payload = { challengeId, memberId: String(mem.userId), roleId: need.Screener };
+    log.info('RES getMemberByHandle', { handle, userId: mem.userId });
+    const payload = { challengeId, memberId: String(mem.userId), roleId };
     log.info('REQ addResource', payload);
     try {
-      await TC.addResource(token, payload);
+      const added = await TC.addResource(token, payload);
       cancel.check();
       log.info('RES addResource', { ok: true });
-      log.info('Added screener', { handle: cfg.screener });
+      log.info('Added resource', { handle, role: roleLabel });
+      return added;
     } catch (error: any) {
       cancel.check();
-      log.warn('Failed to add screener resource (may already exist)', {
-        handle: cfg.screener,
+      log.warn(`Failed to add ${roleLabel} resource (may already exist)`, {
+        handle,
+        role: roleLabel,
         error: error?.message || String(error)
       });
-      if (ctx) ctx.recordFailure(error, { requestBody: payload });
+      ctx?.recordFailure(error, { requestBody: payload });
+      return null;
     }
+  };
+
+  if (cfg.copilotHandle && need.Copilot) {
+    await addResourceSafe(cfg.copilotHandle, need.Copilot, 'Copilot');
+  }
+
+  if (cfg.screener && need.Screener) {
+    await addResourceSafe(cfg.screener, need.Screener, 'Screener');
   } else if (cfg.screener && !need.Screener) {
     log.warn('Screener handle configured but Screener role ID not found', { handle: cfg.screener });
   }
 
-  // Reviewers
   for (const h of cfg.reviewers) {
-    cancel.check();
-    log.info('REQ getMemberByHandle', { handle: h });
-    const mem = await TC.getMemberByHandle(token, h);
-    cancel.check();
-    log.info('RES getMemberByHandle', { handle: h, userId: mem.userId });
-    const payload = { challengeId, memberId: String(mem.userId), roleId: need.Reviewer };
-    log.info('REQ addResource', payload);
-    const added = await TC.addResource(token, payload);
-    cancel.check();
-    log.info('RES addResource', { ok: true });
-    log.info('Added reviewer', { handle: h });
-    const resourceId = added?.id ? String(added.id) : added?.resourceId ? String(added.resourceId) : undefined;
-    if (resourceId) {
-      reviewerResources[h] = resourceId;
-      reviewerResourcesChanged = true;
-    } else {
-      log.warn('Reviewer resource created but no id returned; cannot map resourceId', { handle: h });
+    const added = need.Reviewer ? await addResourceSafe(h, need.Reviewer, 'Reviewer') : null;
+    if (added) {
+      const resourceId = added?.id ? String(added.id) : added?.resourceId ? String(added.resourceId) : undefined;
+      if (resourceId) {
+        reviewerResources[h] = resourceId;
+        reviewerResourcesChanged = true;
+      } else {
+        log.warn('Reviewer resource created but no id returned; cannot map resourceId', { handle: h });
+      }
     }
   }
-  // Submitters
+
   for (const h of cfg.submitters) {
-    cancel.check();
-    log.info('REQ getMemberByHandle', { handle: h });
-    const mem = await TC.getMemberByHandle(token, h);
-    cancel.check();
-    log.info('RES getMemberByHandle', { handle: h, userId: mem.userId });
-    const payload = { challengeId, memberId: String(mem.userId), roleId: need.Submitter };
-    log.info('REQ addResource', payload);
-    await TC.addResource(token, payload);
-    cancel.check();
-    log.info('RES addResource', { ok: true });
-    log.info('Added submitter', { handle: h });
+    if (!need.Submitter) break;
+    await addResourceSafe(h, need.Submitter, 'Submitter');
+  }
+
+  if (need.Approver) {
+    for (const assignment of extraAssignments) {
+      if (!assignment || !assignment.roleName || !assignment.handle) continue;
+      if (assignment.roleName !== 'Approver') continue;
+      await addResourceSafe(assignment.handle, need.Approver, 'Approver');
+    }
+  } else if (extraAssignments.some(a => a.roleName === 'Approver')) {
+    log.warn('Approver role ID not available; cannot assign approver resource');
   }
 
   try {
@@ -710,16 +975,28 @@ async function stepAssignResources(
       memberHandle: typeof res.memberHandle === 'string' ? res.memberHandle : undefined,
       roleId: res.roleId !== undefined ? String(res.roleId) : undefined
     }));
-    const byHandle = new Map<string, { id: string; roleId?: string }[]>();
+    const byHandleArray = new Map<string, { id: string; roleId?: string }[]>();
+    const resourcesByHandle: Record<string, Record<string, string>> = {};
     for (const res of challengeResources) {
       if (!res.memberHandle) continue;
+      const roleId = res.roleId ? String(res.roleId) : undefined;
+      const roleName = roleId ? roleNameById[roleId] : undefined;
+      const variants = new Set<string>();
+      variants.add(res.memberHandle);
+      variants.add(res.memberHandle.toLowerCase());
+      for (const variant of variants) {
+        if (!resourcesByHandle[variant]) resourcesByHandle[variant] = {};
+        if (roleName && !resourcesByHandle[variant][roleName]) {
+          resourcesByHandle[variant][roleName] = res.id;
+        }
+      }
       const handleKey = res.memberHandle.toLowerCase();
-      if (!byHandle.has(handleKey)) byHandle.set(handleKey, []);
-      byHandle.get(handleKey)!.push({ id: res.id, roleId: res.roleId });
+      if (!byHandleArray.has(handleKey)) byHandleArray.set(handleKey, []);
+      byHandleArray.get(handleKey)!.push({ id: res.id, roleId: res.roleId });
     }
     for (const reviewerHandle of cfg.reviewers) {
       const handleKey = reviewerHandle.toLowerCase();
-      const entries = byHandle.get(handleKey);
+      const entries = byHandleArray.get(handleKey);
       if (!entries || !entries.length) continue;
       const preferred = entries.find(e => !need.Reviewer || e.roleId === need.Reviewer) || entries[0];
       if (!preferred?.id) continue;
@@ -729,6 +1006,14 @@ async function stepAssignResources(
         reviewerResourcesChanged = true;
       }
     }
+    if (Object.keys(resourcesByHandle).length) {
+      lr.reviewerResourcesByHandle = {
+        ...(typeof lr.reviewerResourcesByHandle === 'object' && lr.reviewerResourcesByHandle !== null
+          ? lr.reviewerResourcesByHandle
+          : {}),
+        ...resourcesByHandle
+      };
+    }
   } catch (error: any) {
     log.warn('Failed to fetch challenge resources after assignment', { error: error?.message || String(error) });
   }
@@ -737,14 +1022,22 @@ async function stepAssignResources(
     copilot: cfg.copilotHandle ? 1 : 0,
     screener: cfg.screener ? 1 : 0,
     reviewers: cfg.reviewers.length,
-    submitters: cfg.submitters.length
+    submitters: cfg.submitters.length,
+    approvers: challengeResources?.filter(res => res.roleId === need.Approver).length ?? 0
   };
   log.info('Resources assigned', summary, getStepProgress('assignResources'));
+
   const patch: Record<string, unknown> = {};
   if (challengeResources) patch.challengeResources = challengeResources;
-  const roleIdsPatch = Object.fromEntries(Object.entries(need).filter(([, value]) => typeof value === 'string' && value.length > 0));
-  if (Object.keys(roleIdsPatch).length) patch.resourceRoleIds = roleIdsPatch;
+  const existingRoleIds = (lr.resourceRoleIds && typeof lr.resourceRoleIds === 'object') ? lr.resourceRoleIds : {};
+  const roleIdsPatch = Object.fromEntries(
+    Object.entries(need).filter(([, value]) => typeof value === 'string' && value.length > 0)
+  );
+  if (Object.keys(roleIdsPatch).length) patch.resourceRoleIds = { ...existingRoleIds, ...roleIdsPatch };
   if (reviewerResourcesChanged) patch.reviewerResources = reviewerResources;
+  if (lr.reviewerResourcesByHandle) {
+    patch.reviewerResourcesByHandle = lr.reviewerResourcesByHandle;
+  }
   if (Object.keys(patch).length) {
     writeLastRun(patch);
   }
@@ -795,6 +1088,198 @@ async function stepCreateSubmissions(
   }
 
   log.info('Submissions created', { count: createdCount }, getStepProgress('createSubmissions'));
+}
+
+async function stepCreateScreeningReviews(
+  log: RunnerLogger,
+  token: string,
+  cfg: FlowConfig,
+  challengeId: string,
+  cancel: CancellationHelpers,
+  ctx?: StepContext
+) {
+  const { readLastRun, writeLastRun } = await import('../utils/lastRun.js');
+  log.info('Completing screening reviews for submissions...');
+  log.info('REQ getScorecard', { scorecardId: cfg.scorecardId });
+  const scorecard = await TC.getScorecard(token, cfg.scorecardId);
+  cancel.check();
+  const groups = scorecard?.scorecardGroups || [];
+  const questions: any[] = [];
+  for (const g of groups) for (const s of (g.sections || [])) for (const q of (s.questions || [])) questions.push(q);
+
+  const lr = readLastRun();
+  const submissionsMap: Record<string, string[]> = (lr.submissions || {}) as Record<string, string[]>;
+  const handles = Object.keys(submissionsMap);
+  if (!handles.length) {
+    log.warn('No submissions recorded; skipping screening reviews');
+    return;
+  }
+
+  const failureSet = new Set<string>();
+  for (const handle of handles) {
+    const perHandle = submissionsMap[handle] || [];
+    if (perHandle.length) failureSet.add(String(perHandle[0]));
+  }
+
+  const resourcesByHandle = (lr as any).reviewerResourcesByHandle as Record<string, Record<string, string>> | undefined;
+  const candidateResourceIds: string[] = [];
+  const screenerHandle = cfg.screener || '';
+  if (resourcesByHandle) {
+    const direct = resourcesByHandle[screenerHandle];
+    const lower = resourcesByHandle[screenerHandle.toLowerCase()];
+    const source = direct || lower;
+    if (source) {
+      for (const value of Object.values(source)) {
+        if (value && !candidateResourceIds.includes(value)) candidateResourceIds.push(value);
+      }
+    }
+  }
+
+  const expectedCount = handles.reduce((acc, h) => acc + ((submissionsMap[h] || []).length), 0);
+  let pendingByKey = new Map<string, any>();
+  let pendingBySubmission = new Map<string, any[]>();
+  const maxAttempts = 12;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    cancel.check();
+    log.info('REQ listReviews', { challengeId, attempt: attempt + 1 });
+    const listResponse = await TC.listReviews(token, challengeId);
+    cancel.check();
+    const existingReviews = Array.isArray(listResponse)
+      ? listResponse
+      : Array.isArray((listResponse as any)?.data)
+        ? (listResponse as any).data
+        : [];
+    pendingByKey = new Map<string, any>();
+    pendingBySubmission = new Map<string, any[]>();
+    for (const review of existingReviews) {
+      const status = typeof review?.status === 'string' ? review.status.toUpperCase() : '';
+      if (status !== 'PENDING' && status !== 'IN_PROGRESS') continue;
+      const resourceId = toStringId((review as any).resourceId);
+      const submissionId = toStringId((review as any).submissionId);
+      if (resourceId && submissionId) pendingByKey.set(`${resourceId}:${submissionId}`, review);
+      if (submissionId) {
+        const bucket = pendingBySubmission.get(submissionId) || [];
+        bucket.push(review);
+        pendingBySubmission.set(submissionId, bucket);
+      }
+    }
+
+    let readyMatches = 0;
+    for (const handle of handles) {
+      const subs = submissionsMap[handle] || [];
+      for (const subId of subs) {
+        let matched = false;
+        for (const rid of candidateResourceIds) {
+          if (pendingByKey.has(`${rid}:${subId}`)) { matched = true; break; }
+        }
+        if (!matched) {
+          const bucket = pendingBySubmission.get(String(subId)) || [];
+          if (bucket.length === 1) matched = true;
+        }
+        if (matched) readyMatches += 1;
+      }
+    }
+    if (readyMatches >= expectedCount) break;
+    if (attempt < maxAttempts - 1) await cancel.wait(5000);
+  }
+
+  const patched: any[] = [];
+  for (const handle of handles) {
+    const subs = submissionsMap[handle] || [];
+    for (const rawSubId of subs) {
+      const subId = String(rawSubId);
+      cancel.check();
+      let pending: any | undefined;
+      for (const rid of candidateResourceIds) {
+        const key = `${rid}:${subId}`;
+        if (pendingByKey.has(key)) { pending = pendingByKey.get(key); break; }
+      }
+      if (!pending) {
+        const bucket = pendingBySubmission.get(subId) || [];
+        if (bucket.length === 1) pending = bucket[0];
+      }
+      if (!pending) {
+        log.warn('No pending screening review found for submission', { handle, submissionId: subId });
+        continue;
+      }
+
+      const shouldFail = failureSet.has(subId);
+      const outcomeLabel = shouldFail ? 'fail' : 'pass';
+      const scoreForOutcome = shouldFail ? 10 : 100;
+      const existingItems = Array.isArray(pending.reviewItems) ? pending.reviewItems : [];
+      const itemsByQuestion = new Map<string, any>(existingItems
+        .filter((item: any) => item && item.scorecardQuestionId !== undefined)
+        .map((item: any) => [String(item.scorecardQuestionId), item])
+      );
+      const reviewItems = questions.map(q => {
+        const existingItem = itemsByQuestion.get(String(q.id));
+        if (q.type === 'YES_NO') {
+          const answer = shouldFail ? 'NO' : 'YES';
+          const payload: any = {
+            scorecardQuestionId: q.id,
+            initialAnswer: answer,
+            reviewItemComments: [{ content: buildMarkdownReviewItemComment(q, answer), type: 'COMMENT', sortOrder: 1 }]
+          };
+          if (existingItem?.id !== undefined) payload.id = existingItem.id;
+          return payload;
+        }
+        if (q.type === 'SCALE') {
+          const min = typeof q.scaleMin === 'number' ? q.scaleMin : 1;
+          const max = typeof q.scaleMax === 'number' ? q.scaleMax : 10;
+          const value = shouldFail ? String(min) : String(max);
+          const payload: any = {
+            scorecardQuestionId: q.id,
+            initialAnswer: value,
+            reviewItemComments: [{ content: buildMarkdownReviewItemComment(q, value), type: 'COMMENT', sortOrder: 1 }]
+          };
+          if (existingItem?.id !== undefined) payload.id = existingItem.id;
+          return payload;
+        }
+        const answer = shouldFail ? 'NO' : 'YES';
+        const payload: any = {
+          scorecardQuestionId: q.id,
+          initialAnswer: answer,
+          reviewItemComments: [{ content: buildMarkdownReviewItemComment(q, answer), type: 'COMMENT', sortOrder: 1 }]
+        };
+        if (existingItem?.id !== undefined) payload.id = existingItem.id;
+        return payload;
+      });
+
+      const rawMetadata = (pending as any)?.metadata;
+      const metadata = (typeof rawMetadata === 'object' && rawMetadata !== null)
+        ? { ...(rawMetadata as any), outcome: outcomeLabel, score: scoreForOutcome }
+        : { outcome: outcomeLabel, score: scoreForOutcome };
+
+      const payload: any = {
+        scorecardId: pending?.scorecardId || cfg.scorecardId,
+        typeId: pending?.typeId || 'REVIEW',
+        metadata,
+        status: 'COMPLETED',
+        reviewDate: dayjs().toISOString(),
+        committed: true,
+        reviewItems,
+        score: scoreForOutcome,
+        isPassing: !shouldFail
+      };
+
+      try {
+        log.info('REQ patchReview', { reviewId: String(pending.id), payload });
+        const r = await TC.updateReview(token, String(pending.id), payload);
+        cancel.check();
+        patched.push(r);
+        log.info('Screening review completed', { reviewId: r.id, submissionId: subId, outcome: outcomeLabel });
+      } catch (error: any) {
+        log.warn('Failed to complete screening review', {
+          submissionId: subId,
+          error: error?.message || String(error)
+        });
+        ctx?.recordFailure(error, { requestBody: payload });
+      }
+    }
+  }
+
+  writeLastRun({ screeningFailures: Array.from(failureSet) });
+  log.info('Screening reviews patched', { count: patched.length, failures: failureSet.size }, getStepProgress('createScreeningReviews'));
 }
 
 function randPick<T>(arr: T[]): T { return arr[Math.floor(Math.random()*arr.length)]; }
@@ -940,6 +1425,11 @@ async function stepCreateReviews(
   const submitterRole = (roles.find((r:any)=>r.name==='Submitter')||{}).id;
 
   const lr = readLastRun();
+  const screeningFailures = new Set<string>(
+    Array.isArray(lr.screeningFailures)
+      ? lr.screeningFailures.map((id: any) => String(id))
+      : []
+  );
   const reviewerResourceMap = lr.reviewerResources || {};
   const reviewerResources: { handle: string, resourceId: string }[] = [];
   for (const h of cfg.reviewers) {
@@ -972,16 +1462,24 @@ async function stepCreateReviews(
     }
     for (const submissionId of subIds) {
       cancel.check();
+      const submissionIdStr = String(submissionId);
+      if (screeningFailures.has(submissionIdStr)) {
+        log.info('Skipping review for submission that failed screening', {
+          submitter: submitterHandle,
+          submissionId: submissionIdStr
+        });
+        continue;
+      }
       for (const rev of reviewerResources) {
         cancel.check();
-        const pendingReviewKey = `${rev.resourceId}:${submissionId}`;
+        const pendingReviewKey = `${rev.resourceId}:${submissionIdStr}`;
         const pendingReview = pendingReviewMap.get(pendingReviewKey);
         if (!pendingReview) {
           log.warn('No pending review found; skipping patch', {
             reviewer: rev.handle,
             resourceId: rev.resourceId,
             submitter: submitterHandle,
-            submissionId
+            submissionId: submissionIdStr
           });
           continue;
         }
@@ -992,7 +1490,7 @@ async function stepCreateReviews(
             reviewer: rev.handle,
             resourceId: rev.resourceId,
             submitter: submitterHandle,
-            submissionId
+            submissionId: submissionIdStr
           });
           continue;
         }
@@ -1082,13 +1580,19 @@ async function stepCreateReviews(
             reviewerHandle: rev.handle
           };
           updated.push(reviewRecord);
-          const key = `${rev.handle}:${submitterHandle}:${submissionId}`;
+          const key = `${rev.handle}:${submitterHandle}:${submissionIdStr}`;
           const reviews = { ...(lr.reviews||{}), [key]: r.id };
           writeLastRun({ reviews });
           pendingReviewMap.delete(pendingReviewKey);
-          log.info('Patched review', { reviewer: rev.handle, submitter: submitterHandle, submissionId, reviewId });
+          log.info('Patched review', { reviewer: rev.handle, submitter: submitterHandle, submissionId: submissionIdStr, reviewId });
         } catch (e:any) {
-          log.warn('Patch review failed (check submissionId/phaseId requirements in your env)', { reviewer: rev.handle, submitter: submitterHandle, submissionId, reviewId, error: e?.message || String(e) });
+          log.warn('Patch review failed (check submissionId/phaseId requirements in your env)', {
+            reviewer: rev.handle,
+            submitter: submitterHandle,
+            submissionId: submissionIdStr,
+            reviewId,
+            error: e?.message || String(e)
+          });
           ctx?.recordFailure(e, { requestBody: payload });
         }
       }
@@ -1096,6 +1600,93 @@ async function stepCreateReviews(
   }
   log.info('Reviews patched', { count: updated.length }, getStepProgress('createReviews'));
   return { reviews: updated, questions };
+}
+
+async function stepApprovalFlowDesignSingle(
+  log: RunnerLogger,
+  token: string,
+  cfg: FlowConfig,
+  challengeId: string,
+  cancel: CancellationHelpers,
+  ctx?: StepContext
+) {
+  log.info('Completing approval review for design single flow...');
+  const listResponse = await TC.listReviews(token, challengeId);
+  cancel.check();
+  const list = Array.isArray(listResponse)
+    ? listResponse
+    : Array.isArray((listResponse as any)?.data)
+      ? (listResponse as any).data
+      : [];
+  const pending = list.filter((r: any) => {
+    const status = typeof r?.status === 'string' ? r.status.toUpperCase() : '';
+    return status === 'PENDING' || status === 'IN_PROGRESS';
+  });
+  if (!pending.length) {
+    log.warn('No pending approval reviews found');
+    return;
+  }
+  const target = pending[0];
+  const scorecardId = target?.scorecardId || cfg.scorecardId;
+  log.info('REQ getScorecard', { scorecardId });
+  const scorecard = await TC.getScorecard(token, String(scorecardId));
+  cancel.check();
+  const groups = scorecard?.scorecardGroups || [];
+  const questions: any[] = [];
+  for (const g of groups) for (const s of (g.sections || [])) for (const q of (s.questions || [])) questions.push(q);
+
+  const reviewItems = questions.map(q => {
+    if (q.type === 'YES_NO') {
+      const answer = 'YES';
+      return {
+        scorecardQuestionId: q.id,
+        initialAnswer: answer,
+        reviewItemComments: [{ content: buildMarkdownReviewItemComment(q, answer), type: 'COMMENT', sortOrder: 1 }]
+      };
+    }
+    if (q.type === 'SCALE') {
+      const max = typeof q.scaleMax === 'number' ? q.scaleMax : 10;
+      const value = String(max);
+      return {
+        scorecardQuestionId: q.id,
+        initialAnswer: value,
+        reviewItemComments: [{ content: buildMarkdownReviewItemComment(q, value), type: 'COMMENT', sortOrder: 1 }]
+      };
+    }
+    const answer = 'YES';
+    return {
+      scorecardQuestionId: q.id,
+      initialAnswer: answer,
+      reviewItemComments: [{ content: buildMarkdownReviewItemComment(q, answer), type: 'COMMENT', sortOrder: 1 }]
+    };
+  });
+
+  const rawMetadata = (target as any)?.metadata;
+  const metadata = (typeof rawMetadata === 'object' && rawMetadata !== null)
+    ? { ...(rawMetadata as any), outcome: 'pass', score: 100 }
+    : { outcome: 'pass', score: 100 };
+
+  const payload: any = {
+    scorecardId,
+    typeId: target?.typeId || 'REVIEW',
+    metadata,
+    status: 'COMPLETED',
+    reviewDate: dayjs().toISOString(),
+    committed: true,
+    reviewItems,
+    score: 100,
+    isPassing: true
+  };
+
+  try {
+    log.info('REQ patchReview', { reviewId: String(target.id), payload });
+    await TC.updateReview(token, String(target.id), payload);
+    cancel.check();
+    log.info('Approval review completed', { reviewId: String(target.id) }, getStepProgress('createApprovalReview'));
+  } catch (error: any) {
+    log.warn('Failed to complete approval review', { error: error?.message || String(error) });
+    ctx?.recordFailure(error, { requestBody: payload });
+  }
 }
 
 async function stepCreateAppeals(

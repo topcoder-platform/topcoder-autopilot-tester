@@ -103,7 +103,7 @@ function buildDesignEntries(config: DesignConfig) {
 }
 
 export default function ConfigTable({ flow, config }: Props) {
-  const entries = flow === 'full'
+  const entries = (flow === 'full' || flow === 'designSingle')
     ? buildFullEntries(config as FullChallengeConfig)
     : flow === 'design'
       ? buildDesignEntries(config as DesignConfig)

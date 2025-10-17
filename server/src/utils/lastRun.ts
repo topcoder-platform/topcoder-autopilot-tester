@@ -27,6 +27,7 @@ export type LastRun = {
   reviewerResourcesByHandle?: { [handle: string]: { [roleName: string]: string } };
   challengeResources?: ChallengeResource[]; // resources fetched from challenge API
   resourceRoleIds?: { [roleName: string]: string }; // cached resource role IDs by name
+  screeningFailures?: string[];
 };
 
 export function readLastRun(): LastRun {

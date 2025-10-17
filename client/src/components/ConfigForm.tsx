@@ -15,6 +15,8 @@ function getFlowConfig(config: AppConfig, flow: FlowVariant): FullChallengeConfi
       return config.fullChallenge;
     case 'design':
       return config.designChallenge;
+    case 'designSingle':
+      return config.designSingleChallenge;
     case 'first2finish':
       return config.first2finish;
     case 'topgear':
@@ -51,6 +53,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
   const [formConfig, setFormConfig] = useState<FullChallengeConfig | First2FinishConfig | DesignConfig>(() => getFlowConfig(config, flow));
   const [listInputs, setListInputs] = useState<ListInputs>({ reviewers: '', reviewer: '', screener: '', approver: '', checkpointScreener: '', checkpointReviewer: '', submitters: '', prizes: '', prize: '' });
   const isFull = flow === 'full';
+  const isFullLike = flow === 'full' || flow === 'designSingle';
   const isDesign = flow === 'design';
   const iterativeLabel = flow === 'topgear' ? 'Topgear Task' : (flow === 'topgearLate' ? 'Topgear Task (Late)' : 'First2Finish');
 
@@ -77,11 +80,11 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
   useEffect(() => {
     setFormConfig(activeConfig);
     setListInputs({
-      reviewers: isFull && Array.isArray((activeConfig as FullChallengeConfig).reviewers)
+      reviewers: isFullLike && Array.isArray((activeConfig as FullChallengeConfig).reviewers)
         ? (activeConfig as FullChallengeConfig).reviewers.join(', ')
         : '',
-      reviewer: isDesign ? (activeConfig as DesignConfig).reviewer ?? '' : (!isFull ? (activeConfig as First2FinishConfig).reviewer ?? '' : ''),
-      screener: isFull
+      reviewer: isDesign ? (activeConfig as DesignConfig).reviewer ?? '' : (!isFullLike ? (activeConfig as First2FinishConfig).reviewer ?? '' : ''),
+      screener: isFullLike
         ? ((activeConfig as FullChallengeConfig).screener ?? '')
         : isDesign
           ? ((activeConfig as DesignConfig).screener ?? (activeConfig as DesignConfig).screeningReviewer ?? (activeConfig as DesignConfig).reviewer ?? '')
@@ -90,14 +93,14 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
       checkpointScreener: isDesign ? ((activeConfig as DesignConfig).checkpointScreener ?? (activeConfig as DesignConfig).screener ?? (activeConfig as DesignConfig).screeningReviewer ?? (activeConfig as DesignConfig).reviewer ?? '') : '',
       checkpointReviewer: isDesign ? ((activeConfig as DesignConfig).checkpointReviewer ?? (activeConfig as DesignConfig).reviewer ?? '') : '',
       submitters: Array.isArray(activeConfig.submitters) ? activeConfig.submitters.join(', ') : '',
-      prizes: (isFull || isDesign) && Array.isArray((activeConfig as any).prizes)
+      prizes: (isFullLike || isDesign) && Array.isArray((activeConfig as any).prizes)
         ? ((activeConfig as any).prizes as number[]).join(', ')
         : '',
-      prize: (!isFull && !isDesign) && typeof (activeConfig as First2FinishConfig).prize === 'number'
+      prize: (!isFullLike && !isDesign) && typeof (activeConfig as First2FinishConfig).prize === 'number'
         ? String((activeConfig as First2FinishConfig).prize)
         : ''
     });
-  }, [activeConfig, isFull, isDesign]);
+  }, [activeConfig, isFullLike, isDesign]);
 
   useEffect(() => {
     const loadScores = async () => {
@@ -141,6 +144,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
       ...config,
       fullChallenge: flow === 'full' ? formConfig as FullChallengeConfig : config.fullChallenge,
       designChallenge: flow === 'design' ? formConfig as DesignConfig : config.designChallenge,
+      designSingleChallenge: flow === 'designSingle' ? formConfig as FullChallengeConfig : config.designSingleChallenge,
       first2finish: flow === 'first2finish' ? formConfig as First2FinishConfig : config.first2finish,
       topgear: (flow === 'topgear' || flow === 'topgearLate') ? formConfig as TopgearConfig : config.topgear
     };
@@ -349,7 +353,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
         </div>
       ) : null}
 
-      {isFull ? (
+      {isFullLike ? (
         <>
           <div className="row">
             <div className="col">

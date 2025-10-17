@@ -24,6 +24,8 @@ function getFlowConfig(config: AppConfig, flow: FlowVariant) {
       return config.fullChallenge
     case 'design':
       return config.designChallenge
+    case 'designSingle':
+      return config.designSingleChallenge
     case 'first2finish':
       return config.first2finish
     case 'topgear':
@@ -71,6 +73,9 @@ export default function App() {
       primary = '#dc2626'
       primaryStrong = '#b91c1c'
     } else if (activeFlow === 'design') {
+      primary = '#ea580c'
+      primaryStrong = '#c2410c'
+    } else if (activeFlow === 'designSingle') {
       primary = '#ea580c'
       primaryStrong = '#c2410c'
     }
@@ -152,7 +157,7 @@ export default function App() {
                 activeColor: '#f8fafc',
                 inactiveColor: '#fecaca'
               }
-            } else if (flowKey === 'design') {
+            } else if (flowKey === 'design' || flowKey === 'designSingle') {
               palette = {
                 activeBackground: '#ea580c',
                 inactiveBackground: '#7c2d12',

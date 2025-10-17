@@ -3,7 +3,7 @@ import { Router } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { RunnerLogger } from '../utils/logger.js';
-import { runFlow, type StepName as FullStepName } from '../services/flowRunner.js';
+import { runFlow, runDesignSingleFlow, type StepName as FullStepName, type DesignSingleStepName } from '../services/flowRunner.js';
 import { runFirst2FinishFlow, type StepName as First2FinishStepName } from '../services/first2finishRunner.js';
 import { runDesignFlow, type StepName as DesignStepName } from '../services/designRunner.js';
 import { readAppConfigFile } from '../types/config.js';
@@ -31,9 +31,11 @@ router.get('/stream', async (req, res) => {
       ? 'topgear'
       : flowParam === 'topgearlate'
         ? 'topgearLate'
-        : flowParam === 'design'
-          ? 'design'
-          : 'full';
+        : flowParam === 'designsingle'
+          ? 'designSingle'
+          : flowParam === 'design'
+            ? 'design'
+            : 'full';
 
   // Cancel any previously running flow before starting a new one.
   if (activeRun) {
@@ -92,6 +94,14 @@ router.get('/stream', async (req, res) => {
         appConfig.designChallenge,
         mode,
         toStepRaw as DesignStepName | undefined,
+        log,
+        controller.signal
+      );
+    } else if (flowVariant === 'designSingle') {
+      await runDesignSingleFlow(
+        appConfig.designSingleChallenge,
+        mode,
+        toStepRaw as DesignSingleStepName | undefined,
         log,
         controller.signal
       );

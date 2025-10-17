@@ -66,6 +66,7 @@ export type AppConfig = {
   first2finish: First2FinishConfig;
   topgear: TopgearConfig;
   designChallenge: DesignConfig;
+  designSingleChallenge: FlowConfig;
 };
 
 export const FIRST2FINISH_TIMELINE_TEMPLATE_ID = '0a0fed34-cb5a-47f5-b0cb-6e2ee7de8dcb';
@@ -134,6 +135,11 @@ export const DEFAULT_DESIGN_CONFIG: DesignConfig = {
   checkpointScorecardId: 'jEChE8UnLAxHTD',
   prizes: [500, 200, 100],
   submissionZipPath: './artifacts/sample-submission.zip'
+};
+
+export const DEFAULT_DESIGN_SINGLE_CONFIG: FlowConfig = {
+  ...DEFAULT_FLOW_CONFIG,
+  timelineTemplateId: '918f6a3e-1a63-4680-8b5e-deb95b1411e7'
 };
 
 function ensurePrizeTuple(input: unknown, fallback: PrizeTuple): PrizeTuple {
@@ -229,9 +235,8 @@ function normalizeIterativeConfig(
   return normalized;
 }
 
-export function normalizeFlowConfig(value: unknown): FlowConfig {
+export function normalizeFlowConfig(value: unknown, fallback: FlowConfig = DEFAULT_FLOW_CONFIG): FlowConfig {
   const base = typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
-  const fallback = DEFAULT_FLOW_CONFIG;
   return {
     challengeNamePrefix: ensureString(base.challengeNamePrefix, fallback.challengeNamePrefix),
     projectId: ensureNumber(base.projectId, fallback.projectId),
@@ -313,12 +318,13 @@ export function normalizeAppConfig(raw: unknown): AppConfig {
       fullChallenge: DEFAULT_FLOW_CONFIG,
       first2finish: DEFAULT_FIRST2FINISH_CONFIG,
       topgear: DEFAULT_TOPGEAR_CONFIG,
-      designChallenge: DEFAULT_DESIGN_CONFIG
+      designChallenge: DEFAULT_DESIGN_CONFIG,
+      designSingleChallenge: DEFAULT_DESIGN_SINGLE_CONFIG
     };
   }
 
   const data = raw as Record<string, unknown>;
-  const hasNewStructure = ['fullChallenge', 'first2finish', 'topgear', 'designChallenge'].some(key => Object.prototype.hasOwnProperty.call(data, key));
+  const hasNewStructure = ['fullChallenge', 'first2finish', 'topgear', 'designChallenge', 'designSingleChallenge'].some(key => Object.prototype.hasOwnProperty.call(data, key));
 
   if (!hasNewStructure) {
     const flowConfig = normalizeFlowConfig(data);
@@ -341,14 +347,30 @@ export function normalizeAppConfig(raw: unknown): AppConfig {
       submissionsPerSubmitter: ensureNumber((data as any).submissionsPerSubmitter, DEFAULT_DESIGN_CONFIG.submissionsPerSubmitter),
       checkpointScorecardId: ensureString((data as any).checkpointScorecardId, DEFAULT_DESIGN_CONFIG.checkpointScorecardId)
     });
-    return { fullChallenge: flowConfig, first2finish: f2f, topgear, designChallenge };
+    const designSingleBase = {
+      ...flowConfig,
+      timelineTemplateId: DEFAULT_DESIGN_SINGLE_CONFIG.timelineTemplateId,
+      screener: flowConfig.screener ?? DEFAULT_DESIGN_SINGLE_CONFIG.screener
+    };
+    const designSingleChallenge = normalizeFlowConfig(designSingleBase, DEFAULT_DESIGN_SINGLE_CONFIG);
+    return {
+      fullChallenge: flowConfig,
+      first2finish: f2f,
+      topgear,
+      designChallenge,
+      designSingleChallenge
+    };
   }
 
   const full = normalizeFlowConfig(data.fullChallenge);
   const f2f = normalizeFirst2FinishConfig(data.first2finish);
   const topgear = normalizeTopgearConfig(data.topgear);
   const designChallenge = normalizeDesignConfig((data as any).designChallenge);
-  return { fullChallenge: full, first2finish: f2f, topgear, designChallenge };
+  const designSingle = normalizeFlowConfig(
+    (data as any).designSingleChallenge ?? data.fullChallenge,
+    DEFAULT_DESIGN_SINGLE_CONFIG
+  );
+  return { fullChallenge: full, first2finish: f2f, topgear, designChallenge, designSingleChallenge: designSingle };
 }
 
 export function readAppConfigFile(filePath: string): AppConfig {
@@ -358,7 +380,8 @@ export function readAppConfigFile(filePath: string): AppConfig {
         fullChallenge: DEFAULT_FLOW_CONFIG,
         first2finish: DEFAULT_FIRST2FINISH_CONFIG,
         topgear: DEFAULT_TOPGEAR_CONFIG,
-        designChallenge: DEFAULT_DESIGN_CONFIG
+        designChallenge: DEFAULT_DESIGN_CONFIG,
+        designSingleChallenge: DEFAULT_DESIGN_SINGLE_CONFIG
       };
     }
     const rawFile = fs.readFileSync(filePath, 'utf-8');
@@ -370,7 +393,8 @@ export function readAppConfigFile(filePath: string): AppConfig {
       fullChallenge: DEFAULT_FLOW_CONFIG,
       first2finish: DEFAULT_FIRST2FINISH_CONFIG,
       topgear: DEFAULT_TOPGEAR_CONFIG,
-      designChallenge: DEFAULT_DESIGN_CONFIG
+      designChallenge: DEFAULT_DESIGN_CONFIG,
+      designSingleChallenge: DEFAULT_DESIGN_SINGLE_CONFIG
     };
   }
 }
@@ -380,7 +404,8 @@ export function writeAppConfigFile(filePath: string, config: AppConfig) {
     fullChallenge: normalizeFlowConfig(config.fullChallenge),
     first2finish: normalizeFirst2FinishConfig(config.first2finish),
     topgear: normalizeTopgearConfig(config.topgear),
-    designChallenge: normalizeDesignConfig(config.designChallenge)
+    designChallenge: normalizeDesignConfig(config.designChallenge),
+    designSingleChallenge: normalizeFlowConfig(config.designSingleChallenge, DEFAULT_DESIGN_SINGLE_CONFIG)
   };
   fs.writeFileSync(filePath, JSON.stringify(finalConfig, null, 2));
 }
