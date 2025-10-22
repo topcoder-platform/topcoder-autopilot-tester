@@ -69,6 +69,30 @@ const designSingleSteps: FlowStep[] = [
   { id: 'awaitCompletion', label: 'Await Completion' }
 ];
 
+const designSteps: FlowStep[] = [
+  { id: 'token', label: 'Token' },
+  { id: 'createChallenge', label: 'Create Challenge' },
+  { id: 'updateDraft', label: 'Update Draft' },
+  { id: 'activate', label: 'Activate' },
+  { id: 'awaitRegCkptOpen', label: 'Await Reg/Checkpoint Open' },
+  { id: 'assignResources', label: 'Assign Resources' },
+  { id: 'createCheckpointSubmissions', label: 'Create Checkpoint Submissions' },
+  { id: 'awaitCheckpointScreeningOpen', label: 'Await Checkpoint Screening Open' },
+  { id: 'createCheckpointScreeningReviews', label: 'Create Checkpoint Screening Reviews' },
+  { id: 'awaitCheckpointReviewOpen', label: 'Await Checkpoint Review Open' },
+  { id: 'createCheckpointReviews', label: 'Create Checkpoint Reviews' },
+  { id: 'awaitSubmissionOpen', label: 'Await Submission Open' },
+  { id: 'createSubmissions', label: 'Create Submissions' },
+  { id: 'awaitScreeningOpen', label: 'Await Screening Open' },
+  { id: 'createScreeningReviews', label: 'Create Screening Reviews' },
+  { id: 'awaitReviewOpen', label: 'Await Review Open' },
+  { id: 'createReviews', label: 'Create Reviews' },
+  { id: 'awaitApprovalOpen', label: 'Await Approval Open' },
+  { id: 'createApprovalReview', label: 'Create Approval Review' },
+  { id: 'awaitAllClosed', label: 'Await All Closed' },
+  { id: 'awaitCompletion', label: 'Await Completion' }
+];
+
 export const FLOW_DEFINITIONS: Record<FlowVariant, FlowDefinition> = {
   full: {
     key: 'full',
@@ -79,29 +103,19 @@ export const FLOW_DEFINITIONS: Record<FlowVariant, FlowDefinition> = {
   design: {
     key: 'design',
     tabLabel: 'Design Challenge',
-    steps: [
-      { id: 'token', label: 'Token' },
-      { id: 'createChallenge', label: 'Create Challenge' },
-      { id: 'updateDraft', label: 'Update Draft' },
-      { id: 'activate', label: 'Activate' },
-      { id: 'awaitRegCkptOpen', label: 'Await Reg/Checkpoint Open' },
-      { id: 'assignResources', label: 'Assign Resources' },
-      { id: 'createCheckpointSubmissions', label: 'Create Checkpoint Submissions' },
-      { id: 'awaitCheckpointScreeningOpen', label: 'Await Checkpoint Screening Open' },
-      { id: 'createCheckpointScreeningReviews', label: 'Create Checkpoint Screening Reviews' },
-      { id: 'awaitCheckpointReviewOpen', label: 'Await Checkpoint Review Open' },
-      { id: 'createCheckpointReviews', label: 'Create Checkpoint Reviews' },
-      { id: 'awaitSubmissionOpen', label: 'Await Submission Open' },
-      { id: 'createSubmissions', label: 'Create Submissions' },
-      { id: 'awaitScreeningOpen', label: 'Await Screening Open' },
-      { id: 'createScreeningReviews', label: 'Create Screening Reviews' },
-      { id: 'awaitReviewOpen', label: 'Await Review Open' },
-      { id: 'createReviews', label: 'Create Reviews' },
-      { id: 'awaitApprovalOpen', label: 'Await Approval Open' },
-      { id: 'createApprovalReview', label: 'Create Approval Review' },
-      { id: 'awaitAllClosed', label: 'Await All Closed' },
-      { id: 'awaitCompletion', label: 'Await Completion' }
-    ],
+    steps: designSteps,
+    defaultToStep: 'activate'
+  },
+  designFailScreening: {
+    key: 'designFailScreening',
+    tabLabel: 'Design Challenge (Fail screening)',
+    steps: designSteps,
+    defaultToStep: 'activate'
+  },
+  designFailReview: {
+    key: 'designFailReview',
+    tabLabel: 'Design Challenge (Fail review)',
+    steps: designSteps,
     defaultToStep: 'activate'
   },
   designSingle: {
@@ -142,4 +156,13 @@ export const FLOW_DEFINITIONS: Record<FlowVariant, FlowDefinition> = {
   }
 };
 
-export const ORDERED_FLOW_KEYS: FlowVariant[] = ['full', 'design', 'designSingle', 'first2finish', 'topgear', 'topgearLate'];
+export const ORDERED_FLOW_KEYS: FlowVariant[] = [
+  'full',
+  'design',
+  'designSingle',
+  'designFailScreening',
+  'designFailReview',
+  'first2finish',
+  'topgear',
+  'topgearLate'
+];

@@ -57,6 +57,13 @@ const STEPS: StepName[] = [
 
 const PROGRESS_STEPS: StepName[] = STEPS.filter(step => step !== 'token');
 
+const STEP_CATEGORY_MAP: Partial<Record<StepName, 'screening' | 'review'>> = {
+  createCheckpointScreeningReviews: 'screening',
+  createScreeningReviews: 'screening',
+  createCheckpointReviews: 'review',
+  createReviews: 'review'
+};
+
 function getStepProgress(step: StepName): number | undefined {
   const idx = PROGRESS_STEPS.indexOf(step);
   if (idx === -1) return undefined;
@@ -408,7 +415,8 @@ export async function runDesignFlow(
   mode: RunMode,
   toStep: StepName | undefined,
   log: RunnerLogger,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  failureMode?: 'screening' | 'review'
 ) {
   const { writeLastRun, resetLastRun } = await import('../utils/lastRun.js');
   const cancel = createCancellationHelpers(signal, log);
@@ -453,7 +461,8 @@ export async function runDesignFlow(
     cfg.checkpointScreener || cfg.screener || cfg.screeningReviewer || cfg.reviewer,
     'checkpointSubmissions',
     ['Checkpoint Screening'],
-    cancel
+    cancel,
+    failureMode
   ));
   maybeStop(mode, toStep, 'createCheckpointScreeningReviews', log);
 
@@ -470,7 +479,8 @@ export async function runDesignFlow(
     cfg.checkpointReviewer || cfg.reviewer,
     'checkpointSubmissions',
     ['Checkpoint Review'],
-    cancel
+    cancel,
+    failureMode
   ));
   maybeStop(mode, toStep, 'createCheckpointReviews', log);
 
@@ -493,7 +503,8 @@ export async function runDesignFlow(
     cfg.screener || cfg.screeningReviewer || cfg.reviewer,
     'submissions',
     ['Screening'],
-    cancel
+    cancel,
+    failureMode
   ));
   maybeStop(mode, toStep, 'createScreeningReviews', log);
 
@@ -510,7 +521,8 @@ export async function runDesignFlow(
     cfg.reviewer,
     'submissions',
     ['Iterative Review', 'Review'],
-    cancel
+    cancel,
+    failureMode
   ));
   maybeStop(mode, toStep, 'createReviews', log);
 
@@ -587,6 +599,28 @@ async function stepUpdateDraft(
   const approvalPhaseId = await resolvePhaseIdByName(log, token, challengeId, 'Approval', cancel);
 
   const nowIso = dayjs().toISOString();
+  const checkpointPrizeAmount = Math.max(0, Number(cfg.checkpointPrizeAmount ?? 0));
+  const checkpointPrizeCount = Math.max(0, Math.floor(Number(cfg.checkpointPrizeCount ?? 0)));
+  const checkpointPrizes = checkpointPrizeAmount > 0 && checkpointPrizeCount > 0
+    ? Array.from({ length: checkpointPrizeCount }, () => ({ type: 'USD', value: checkpointPrizeAmount }))
+    : null;
+
+  const prizeSets: Array<{ type: string; prizes: Array<{ type: string; value: number }>; description?: string }> = [
+    { type: 'PLACEMENT', prizes: [
+      { type: 'USD', value: cfg.prizes[0] },
+      { type: 'USD', value: cfg.prizes[1] },
+      { type: 'USD', value: cfg.prizes[2] }
+    ]},
+    { type: 'COPILOT', prizes: [{ type: 'USD', value: 100 }]}
+  ];
+  if (checkpointPrizes) {
+    prizeSets.push({
+      type: 'CHECKPOINT',
+      description: 'Checkpoint Prizes',
+      prizes: checkpointPrizes
+    });
+  }
+
   const reviewers: any[] = [];
   if (reviewPhaseId) {
     reviewers.push({
@@ -654,14 +688,7 @@ async function stepUpdateDraft(
     description: 'Design Challenge API Tester',
     tags: [], groups: [],
     startDate: nowIso,
-    prizeSets: [
-      { type: 'PLACEMENT', prizes: [
-        { type: 'USD', value: cfg.prizes[0] },
-        { type: 'USD', value: cfg.prizes[1] },
-        { type: 'USD', value: cfg.prizes[2] }
-      ]},
-      { type: 'COPILOT', prizes: [{ type: 'USD', value: 100 }]}
-    ],
+    prizeSets,
     winners: [], discussions: [],
     reviewers,
     task: { isTask: false, isAssigned: false },
@@ -685,7 +712,9 @@ async function stepUpdateDraft(
     reviewer: cfg.reviewer,
     checkpoints: Boolean(checkpointReviewPhaseId),
     screening: Boolean(screeningPhaseId),
-    approval: Boolean(approvalPhaseId)
+    approval: Boolean(approvalPhaseId),
+    checkpointPrizeAmount,
+    checkpointPrizeCount
   });
   return updated;
 }
@@ -1059,17 +1088,19 @@ async function stepPatchPendingReviews(
   reviewerHandle: string,
   submissionMapKey: 'submissions' | 'checkpointSubmissions',
   phaseNameHints: string[] = [],
-  cancel: CancellationHelpers
+  cancel: CancellationHelpers,
+  failureMode?: 'screening' | 'review'
 ) {
   const { readLastRun, writeLastRun } = await import('../utils/lastRun.js');
   const roleNameForStep = (step: StepName): string | undefined => {
-    switch (step) {
-      case 'createCheckpointScreeningReviews': return 'Checkpoint Screener';
-      case 'createCheckpointReviews': return 'Checkpoint Reviewer';
-      case 'createScreeningReviews': return 'Screener';
-      case 'createReviews': return 'Reviewer';
-      default: return undefined;
+    const category = STEP_CATEGORY_MAP[step];
+    if (category === 'screening') {
+      return step === 'createCheckpointScreeningReviews' ? 'Checkpoint Screener' : 'Screener';
     }
+    if (category === 'review') {
+      return step === 'createCheckpointReviews' ? 'Checkpoint Reviewer' : 'Reviewer';
+    }
+    return undefined;
   };
   log.info('Loading target scorecard for questions', { scorecardId: scorecardIdForQuestions });
   const scorecard = await TC.getScorecard(token, scorecardIdForQuestions);
@@ -1092,14 +1123,24 @@ async function stepPatchPendingReviews(
   const submissionsMap: Record<string, string[]> = (lr as any)[submissionMapKey] || {};
   const handles = Object.keys(submissionsMap);
   const expectedCount = handles.reduce((acc, h) => acc + ((submissionsMap[h] || []).length), 0);
-  const ensureCheckpointFailure = progressStep === 'createCheckpointScreeningReviews';
-  const checkpointFailureSet = new Set<string>();
-  if (ensureCheckpointFailure) {
+  const stepCategory = STEP_CATEGORY_MAP[progressStep];
+  const shouldForceFailures = stepCategory !== undefined && failureMode === stepCategory;
+  const defaultCheckpointFailure = progressStep === 'createCheckpointScreeningReviews' && failureMode === undefined;
+  const shouldApplyDeterministicOutcome = shouldForceFailures || defaultCheckpointFailure;
+  const failureSet = new Set<string>();
+  if (shouldForceFailures) {
     for (const handle of handles) {
       const perHandle = submissionsMap[handle] || [];
-      if (perHandle.length) {
-        // Intentionally fail the first submission for each handle.
-        checkpointFailureSet.add(String(perHandle[0]));
+      for (const submissionId of perHandle) {
+        failureSet.add(String(submissionId));
+      }
+    }
+  }
+  if (defaultCheckpointFailure) {
+    for (const handle of handles) {
+      const perHandle = submissionsMap[handle] || [];
+      if (perHandle.length > 0) {
+        failureSet.add(String(perHandle[0]));
       }
     }
   }
@@ -1175,7 +1216,7 @@ async function stepPatchPendingReviews(
         if (bucket.length === 1) pending = bucket[0];
       }
       if (!pending) continue;
-      const shouldFail = ensureCheckpointFailure && checkpointFailureSet.has(String(subId));
+      const shouldFail = shouldApplyDeterministicOutcome && failureSet.has(String(subId));
       const outcomeLabel = shouldFail ? 'fail' : 'pass';
       const scoreForOutcome = shouldFail ? 10 : 100;
       const existingItems = Array.isArray(pending.reviewItems) ? pending.reviewItems : [];
@@ -1186,7 +1227,7 @@ async function stepPatchPendingReviews(
       const reviewItems = questions.map(q => {
         if (q.type === 'YES_NO') {
           const existingItem = itemsByQuestion.get(String(q.id));
-          const answer = ensureCheckpointFailure
+          const answer = shouldApplyDeterministicOutcome
             ? (shouldFail ? 'NO' : 'YES')
             : randPick(['YES', 'NO']);
           const payload: any = {
@@ -1200,7 +1241,7 @@ async function stepPatchPendingReviews(
           const existingItem = itemsByQuestion.get(String(q.id));
           const min = typeof q.scaleMin === 'number' ? q.scaleMin : 1;
           const max = typeof q.scaleMax === 'number' ? q.scaleMax : 10;
-          const value = ensureCheckpointFailure
+          const value = shouldApplyDeterministicOutcome
             ? String(shouldFail ? min : max)
             : String(randInt(min, max));
           const payload: any = {
@@ -1212,7 +1253,7 @@ async function stepPatchPendingReviews(
           return payload;
         } else {
           const existingItem = itemsByQuestion.get(String(q.id));
-          const answer = ensureCheckpointFailure
+          const answer = shouldApplyDeterministicOutcome
             ? (shouldFail ? 'NO' : 'YES')
             : 'YES';
           const payload: any = {
@@ -1225,7 +1266,7 @@ async function stepPatchPendingReviews(
         }
       });
       const rawMetadata = pending?.metadata;
-      const metadata = ensureCheckpointFailure
+      const metadata = shouldApplyDeterministicOutcome
         ? {
             ...(typeof rawMetadata === 'object' && rawMetadata !== null ? { ...(rawMetadata as any) } : {}),
             outcome: outcomeLabel,
@@ -1245,7 +1286,7 @@ async function stepPatchPendingReviews(
         committed: true,
         reviewItems
       };
-      if (ensureCheckpointFailure) {
+      if (shouldApplyDeterministicOutcome) {
         (payload as any).score = scoreForOutcome;
         (payload as any).isPassing = !shouldFail;
       }

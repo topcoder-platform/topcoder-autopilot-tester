@@ -105,7 +105,7 @@ function buildDesignEntries(config: DesignConfig) {
 export default function ConfigTable({ flow, config }: Props) {
   const entries = (flow === 'full' || flow === 'designSingle')
     ? buildFullEntries(config as FullChallengeConfig)
-    : flow === 'design'
+    : (flow === 'design' || flow === 'designFailScreening' || flow === 'designFailReview')
       ? buildDesignEntries(config as DesignConfig)
       : buildIterativeEntries(config as First2FinishConfig | TopgearConfig);
 

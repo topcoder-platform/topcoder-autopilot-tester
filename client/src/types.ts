@@ -1,4 +1,12 @@
-export type FlowVariant = 'full' | 'first2finish' | 'topgear' | 'topgearLate' | 'design' | 'designSingle';
+export type FlowVariant =
+  | 'full'
+  | 'first2finish'
+  | 'topgear'
+  | 'topgearLate'
+  | 'design'
+  | 'designFailScreening'
+  | 'designFailReview'
+  | 'designSingle';
 
 export type PrizeTuple = [number, number, number];
 
@@ -39,6 +47,8 @@ export type AppConfig = {
   first2finish: First2FinishConfig;
   topgear: TopgearConfig;
   designChallenge: DesignConfig;
+  designFailScreeningChallenge: DesignConfig;
+  designFailReviewChallenge: DesignConfig;
   designSingleChallenge: FullChallengeConfig;
 };
 
@@ -74,5 +84,7 @@ export type DesignConfig = {
   checkpointScreeningScorecardId?: string;
   checkpointReviewScorecardId?: string;
   prizes: [number, number, number];
+  checkpointPrizeAmount: number;
+  checkpointPrizeCount: number;
   submissionZipPath: string;
 };

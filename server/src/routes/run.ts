@@ -33,9 +33,13 @@ router.get('/stream', async (req, res) => {
         ? 'topgearLate'
         : flowParam === 'designsingle'
           ? 'designSingle'
-          : flowParam === 'design'
-            ? 'design'
-            : 'full';
+          : flowParam === 'designfailscreening'
+            ? 'designFailScreening'
+            : flowParam === 'designfailreview'
+              ? 'designFailReview'
+              : flowParam === 'design'
+                ? 'design'
+                : 'full';
 
   // Cancel any previously running flow before starting a new one.
   if (activeRun) {
@@ -104,6 +108,24 @@ router.get('/stream', async (req, res) => {
         toStepRaw as DesignSingleStepName | undefined,
         log,
         controller.signal
+      );
+    } else if (flowVariant === 'designFailScreening') {
+      await (runDesignFlow as any)(
+        appConfig.designFailScreeningChallenge,
+        mode,
+        toStepRaw as DesignStepName | undefined,
+        log,
+        controller.signal,
+        'screening'
+      );
+    } else if (flowVariant === 'designFailReview') {
+      await (runDesignFlow as any)(
+        appConfig.designFailReviewChallenge,
+        mode,
+        toStepRaw as DesignStepName | undefined,
+        log,
+        controller.signal,
+        'review'
       );
     } else {
       await runFlow(

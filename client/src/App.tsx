@@ -26,9 +26,15 @@ function getFlowConfig(config: AppConfig, flow: FlowVariant) {
       return config.designChallenge
     case 'designSingle':
       return config.designSingleChallenge
+    case 'designFailScreening':
+      return config.designFailScreeningChallenge
+    case 'designFailReview':
+      return config.designFailReviewChallenge
     case 'first2finish':
       return config.first2finish
     case 'topgear':
+      return config.topgear
+    case 'topgearLate':
       return config.topgear
     default:
       return config.fullChallenge
@@ -76,6 +82,12 @@ export default function App() {
       primary = '#ea580c'
       primaryStrong = '#c2410c'
     } else if (activeFlow === 'designSingle') {
+      primary = '#ea580c'
+      primaryStrong = '#c2410c'
+    } else if (activeFlow === 'designFailScreening') {
+      primary = '#ea580c'
+      primaryStrong = '#c2410c'
+    } else if (activeFlow === 'designFailReview') {
       primary = '#ea580c'
       primaryStrong = '#c2410c'
     }
@@ -157,7 +169,12 @@ export default function App() {
                 activeColor: '#f8fafc',
                 inactiveColor: '#fecaca'
               }
-            } else if (flowKey === 'design' || flowKey === 'designSingle') {
+            } else if (
+              flowKey === 'design' ||
+              flowKey === 'designSingle' ||
+              flowKey === 'designFailScreening' ||
+              flowKey === 'designFailReview'
+            ) {
               palette = {
                 activeBackground: '#ea580c',
                 inactiveBackground: '#7c2d12',

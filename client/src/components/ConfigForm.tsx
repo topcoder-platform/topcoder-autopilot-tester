@@ -17,6 +17,10 @@ function getFlowConfig(config: AppConfig, flow: FlowVariant): FullChallengeConfi
       return config.designChallenge;
     case 'designSingle':
       return config.designSingleChallenge;
+    case 'designFailScreening':
+      return config.designFailScreeningChallenge;
+    case 'designFailReview':
+      return config.designFailReviewChallenge;
     case 'first2finish':
       return config.first2finish;
     case 'topgear':
@@ -54,7 +58,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
   const [listInputs, setListInputs] = useState<ListInputs>({ reviewers: '', reviewer: '', screener: '', approver: '', checkpointScreener: '', checkpointReviewer: '', submitters: '', prizes: '', prize: '' });
   const isFull = flow === 'full';
   const isFullLike = flow === 'full' || flow === 'designSingle';
-  const isDesign = flow === 'design';
+  const isDesign = flow === 'design' || flow === 'designFailScreening' || flow === 'designFailReview';
   const iterativeLabel = flow === 'topgear' ? 'Topgear Task' : (flow === 'topgearLate' ? 'Topgear Task (Late)' : 'First2Finish');
 
   const activeConfig = useMemo(() => getFlowConfig(config, flow), [config, flow]);
@@ -145,6 +149,8 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
       fullChallenge: flow === 'full' ? formConfig as FullChallengeConfig : config.fullChallenge,
       designChallenge: flow === 'design' ? formConfig as DesignConfig : config.designChallenge,
       designSingleChallenge: flow === 'designSingle' ? formConfig as FullChallengeConfig : config.designSingleChallenge,
+      designFailScreeningChallenge: flow === 'designFailScreening' ? formConfig as DesignConfig : config.designFailScreeningChallenge,
+      designFailReviewChallenge: flow === 'designFailReview' ? formConfig as DesignConfig : config.designFailReviewChallenge,
       first2finish: flow === 'first2finish' ? formConfig as First2FinishConfig : config.first2finish,
       topgear: (flow === 'topgear' || flow === 'topgearLate') ? formConfig as TopgearConfig : config.topgear
     };
@@ -195,6 +201,24 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
   const updateCheckpointReviewer = (value: string) => {
     setListInputs(prev => ({ ...prev, checkpointReviewer: value }));
     update('checkpointReviewer', value.trim());
+  };
+
+  const updateCheckpointPrizeAmount = (value: string) => {
+    const amount = Number.parseFloat(value);
+    if (Number.isNaN(amount)) {
+      update('checkpointPrizeAmount', 0);
+      return;
+    }
+    update('checkpointPrizeAmount', Math.max(0, amount));
+  };
+
+  const updateCheckpointPrizeCount = (value: string) => {
+    const count = Number.parseInt(value, 10);
+    if (Number.isNaN(count)) {
+      update('checkpointPrizeCount', 0);
+      return;
+    }
+    update('checkpointPrizeCount', Math.max(0, count));
   };
 
   const updatePrizes = (value: string) => {
@@ -474,6 +498,30 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
           <div className="col">
             <label>Prizes (1st, 2nd, 3rd)</label>
             <input value={listInputs.prizes} onChange={e => updatePrizes(e.target.value)} />
+          </div>
+        </div>
+      ) : null}
+
+      {isDesign ? (
+        <div className="row">
+          <div className="col">
+            <label>Checkpoint prize amount</label>
+            <input
+              type="number"
+              min={0}
+              value={(formConfig as DesignConfig).checkpointPrizeAmount ?? 0}
+              onChange={e => updateCheckpointPrizeAmount(e.target.value)}
+            />
+          </div>
+          <div className="col">
+            <label>Checkpoint prize count</label>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={(formConfig as DesignConfig).checkpointPrizeCount ?? 0}
+              onChange={e => updateCheckpointPrizeCount(e.target.value)}
+            />
           </div>
         </div>
       ) : null}
