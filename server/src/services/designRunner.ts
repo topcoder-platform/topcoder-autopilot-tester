@@ -1125,22 +1125,14 @@ async function stepPatchPendingReviews(
   const expectedCount = handles.reduce((acc, h) => acc + ((submissionsMap[h] || []).length), 0);
   const stepCategory = STEP_CATEGORY_MAP[progressStep];
   const shouldForceFailures = stepCategory !== undefined && failureMode === stepCategory;
-  const defaultCheckpointFailure = progressStep === 'createCheckpointScreeningReviews' && failureMode === undefined;
-  const shouldApplyDeterministicOutcome = shouldForceFailures || defaultCheckpointFailure;
+  const enforceCheckpointMaxScores = progressStep === 'createCheckpointScreeningReviews' && failureMode === undefined; // Design flow should pass checkpoint screening with max scores
+  const shouldApplyDeterministicOutcome = shouldForceFailures || enforceCheckpointMaxScores;
   const failureSet = new Set<string>();
   if (shouldForceFailures) {
     for (const handle of handles) {
       const perHandle = submissionsMap[handle] || [];
       for (const submissionId of perHandle) {
         failureSet.add(String(submissionId));
-      }
-    }
-  }
-  if (defaultCheckpointFailure) {
-    for (const handle of handles) {
-      const perHandle = submissionsMap[handle] || [];
-      if (perHandle.length > 0) {
-        failureSet.add(String(perHandle[0]));
       }
     }
   }
