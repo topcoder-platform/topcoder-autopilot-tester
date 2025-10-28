@@ -1282,8 +1282,6 @@ async function stepCreateScreeningReviews(
   log.info('Screening reviews patched', { count: patched.length, failures: failureSet.size }, getStepProgress('createScreeningReviews'));
 }
 
-function randPick<T>(arr: T[]): T { return arr[Math.floor(Math.random()*arr.length)]; }
-
 function buildMarkdownReviewItemComment(question: any, answerLabel: string, extraLines: string[] = []): string {
   const rawDescription = typeof question?.description === 'string' ? question.description.trim() : '';
   const description = rawDescription || `Question ${question?.id ?? ''}`.trim() || 'Review item';
@@ -1385,6 +1383,51 @@ async function stepCreateReviews(
   const questions: any[] = [];
   for (const g of groups) for (const s of (g.sections||[])) for (const q of (s.questions||[])) questions.push(q);
 
+  const toScoreNumber = (value: unknown): number | undefined => {
+    if (value === null || value === undefined) return undefined;
+    const num = Number(value);
+    return Number.isFinite(num) ? num : undefined;
+  };
+  const maxScoreCandidates = [
+    toScoreNumber((scorecard as any)?.maxScore),
+    toScoreNumber((scorecard as any)?.maximumScore),
+    toScoreNumber((scorecard as any)?.scorecardMaxScore),
+    toScoreNumber((scorecard as any)?.totalScore)
+  ];
+  const derivedMaxScore = questions.reduce((acc, q) => {
+    const candidates = [
+      toScoreNumber((q as any)?.maxScore),
+      toScoreNumber((q as any)?.maximumScore),
+      toScoreNumber((q as any)?.weight),
+      toScoreNumber((q as any)?.value)
+    ];
+    const value = candidates.find((v) => v !== undefined);
+    return acc + (value ?? 0);
+  }, 0);
+  const normalizedMaxScore = maxScoreCandidates.find((v) => v !== undefined) ?? (derivedMaxScore > 0 ? derivedMaxScore : 100);
+  const minScoreCandidates = [
+    toScoreNumber((scorecard as any)?.minScore),
+    toScoreNumber((scorecard as any)?.minimumScore),
+    toScoreNumber((scorecard as any)?.passingScore),
+    toScoreNumber((scorecard as any)?.minPassingScore)
+  ];
+  const scorecardMinScore = minScoreCandidates.find((v) => v !== undefined);
+  const passingScoreTarget = normalizedMaxScore > 0 ? normalizedMaxScore : 100;
+  let failingScoreTarget = Math.max(0, Math.round((normalizedMaxScore || 100) * 0.6));
+  if (scorecardMinScore !== undefined) {
+    failingScoreTarget = Math.max(0, Math.min(scorecardMinScore - 1, Math.max(0, normalizedMaxScore - 1)));
+  }
+  if (failingScoreTarget >= passingScoreTarget) {
+    const deduction = Math.max(1, Math.round(passingScoreTarget * 0.1));
+    failingScoreTarget = Math.max(0, passingScoreTarget - deduction);
+  }
+  log.info('Scorecard thresholds', {
+    minScore: scorecardMinScore,
+    maxScore: normalizedMaxScore,
+    passingScoreTarget,
+    failingScoreTarget
+  });
+
   log.info('REQ listReviews', { challengeId });
   const listResponse = await TC.listReviews(token, challengeId);
   cancel.check();
@@ -1446,6 +1489,28 @@ async function stepCreateReviews(
     return { reviews: [], questions };
   }
 
+  let passingCandidate: { submitterHandle: string; submissionId: string } | null = null;
+  for (const submitterHandle of cfg.submitters) {
+    cancel.check();
+    const subIds = (lr.submissions && lr.submissions[submitterHandle]) || [];
+    for (const submissionId of subIds) {
+      const submissionIdStr = String(submissionId);
+      if (!screeningFailures.has(submissionIdStr)) {
+        passingCandidate = { submitterHandle, submissionId: submissionIdStr };
+        break;
+      }
+    }
+    if (passingCandidate) break;
+  }
+  if (passingCandidate) {
+    log.info('Ensuring a passing submission for flow completion', {
+      submitter: passingCandidate.submitterHandle,
+      submissionId: passingCandidate.submissionId
+    });
+  } else {
+    log.warn('No eligible submission found to guarantee a passing score');
+  }
+
   // Fetch submissions list via reviews API doesn't expose; we tracked submission IDs when created, but for this simple flow we assume known via listReviews later. To keep moving, we ask the challenge to fetch submissions is not provided; so we manufacture by re-submitting map. In production, persist submission IDs when creating them.
   // Here we won't have them; in real run stepCreateSubmissions logs submission IDs; user can proceed in one run.
   // For demo completeness, we'll create one artificial map to proceed; adjust to your needs.
@@ -1499,36 +1564,56 @@ async function stepCreateReviews(
           .filter((item: any) => item && item.scorecardQuestionId !== undefined)
           .map((item: any) => [String(item.scorecardQuestionId), item])
         );
+        const isGuaranteedPassing = Boolean(
+          passingCandidate &&
+          passingCandidate.submitterHandle === submitterHandle &&
+          passingCandidate.submissionId === submissionIdStr
+        );
+        const shouldPass = isGuaranteedPassing || !passingCandidate;
+        const outcomeLabel = shouldPass ? 'pass' : 'fail';
+        const reviewScore = shouldPass ? passingScoreTarget : failingScoreTarget;
         const reviewItems = questions.map(q => {
+          const existingItem = itemsByQuestion.get(String(q.id));
           if (q.type === 'YES_NO') {
-            const existingItem = itemsByQuestion.get(String(q.id));
-            const answer = randPick(['YES', 'NO']);
-            const commentContent = buildMarkdownReviewItemComment(q, answer, [
-              '#### Checklist',
-              '- [x] Regression suite executed',
-              '- [ ] Manual QA sign-off pending',
-              '',
-              '`Tracking ID:` `auto-review-yes-no`'
-            ]);
+            const answer = shouldPass ? 'YES' : 'NO';
+            const commentExtras = shouldPass
+              ? [
+                  '#### Checklist',
+                  '- [x] Regression suite executed',
+                  '- [x] Manual QA sign-off completed',
+                  '',
+                  '`Tracking ID:` `auto-review-pass`'
+                ]
+              : [
+                  '#### Checklist',
+                  '- [x] Regression suite executed',
+                  '- [ ] Manual QA sign-off pending',
+                  '',
+                  '`Tracking ID:` `auto-review-no`'
+                ];
+            const commentContent = buildMarkdownReviewItemComment(q, answer, commentExtras);
             const payload: any = {
               scorecardQuestionId: q.id,
               initialAnswer: answer,
               reviewItemComments: [{
                 content: commentContent,
-                type: randPick(['COMMENT', 'REQUIRED', 'RECOMMENDED']),
+                type: shouldPass ? 'COMMENT' : 'REQUIRED',
                 sortOrder: 1
               }]
             };
             if (existingItem?.id !== undefined) payload.id = existingItem.id;
             return payload;
-          } else if (q.type === 'SCALE') {
-            const existingItem = itemsByQuestion.get(String(q.id));
+          }
+          if (q.type === 'SCALE') {
             const min = typeof q.scaleMin === 'number' ? q.scaleMin : 1;
             const max = typeof q.scaleMax === 'number' ? q.scaleMax : 10;
-            const value = String(randInt(min, max));
+            const valueNumeric = shouldPass ? max : min;
+            const value = String(valueNumeric);
             const commentContent = buildMarkdownReviewItemComment(q, value, [
               `**Scale Range:** ${min} – ${max}`,
-              '- _Higher scores indicate stronger coverage._',
+              shouldPass
+                ? '- _Scores align with the acceptance criteria._'
+                : '- _Significant gaps remain against the acceptance criteria._',
               '`Metric:` `performance-index`'
             ]);
             const payload: any = {
@@ -1536,37 +1621,50 @@ async function stepCreateReviews(
               initialAnswer: value,
               reviewItemComments: [{
                 content: commentContent,
-                type: randPick(['COMMENT', 'REQUIRED', 'RECOMMENDED']),
+                type: shouldPass ? 'COMMENT' : 'RECOMMENDED',
                 sortOrder: 1
               }]
             };
             if (existingItem?.id !== undefined) payload.id = existingItem.id;
             return payload;
-          } else {
-            const existingItem = itemsByQuestion.get(String(q.id));
-            const fallbackAnswer = 'YES';
-            const commentContent = buildMarkdownReviewItemComment(q, fallbackAnswer, [
-              '*Fallback evaluation applied for non-standard question type.*',
-              '`Tracking ID:` `auto-review-generic`'
-            ]);
-            const payload: any = {
-              scorecardQuestionId: q.id,
-              initialAnswer: fallbackAnswer,
-              reviewItemComments: [{ content: commentContent, type: 'COMMENT', sortOrder: 1 }]
-            };
-            if (existingItem?.id !== undefined) payload.id = existingItem.id;
-            return payload;
           }
+          const fallbackAnswer = shouldPass ? 'YES' : 'NO';
+          const commentContent = buildMarkdownReviewItemComment(q, fallbackAnswer, [
+            shouldPass
+              ? '*Automated validation confirmed the expected behaviour.*'
+              : '*Blocking issues remain unresolved in this area.*',
+            '`Tracking ID:` `auto-review-generic`'
+          ]);
+          const payload: any = {
+            scorecardQuestionId: q.id,
+            initialAnswer: fallbackAnswer,
+            reviewItemComments: [{ content: commentContent, type: shouldPass ? 'COMMENT' : 'REQUIRED', sortOrder: 1 }]
+          };
+          if (existingItem?.id !== undefined) payload.id = existingItem.id;
+          return payload;
         });
+
+        const baseMetadata = pendingReview?.metadata;
+        const metadata: Record<string, unknown> = (typeof baseMetadata === 'object' && baseMetadata !== null)
+          ? { ...(baseMetadata as any) }
+          : {};
+        metadata.outcome = outcomeLabel;
+        metadata.score = reviewScore;
+        if (scorecardMinScore !== undefined) {
+          if (metadata.minScore === undefined) metadata.minScore = scorecardMinScore;
+          if (metadata.minimumScore === undefined) metadata.minimumScore = scorecardMinScore;
+        }
 
         const payload = {
           scorecardId: pendingReview?.scorecardId || cfg.scorecardId,
           typeId: pendingReview?.typeId || 'REVIEW',
-          metadata: pendingReview?.metadata || {},
+          metadata,
           status: 'COMPLETED',
           reviewDate: dayjs().toISOString(),
           committed: true,
-          reviewItems
+          reviewItems,
+          score: reviewScore,
+          isPassing: shouldPass
         };
 
         try {
@@ -1584,7 +1682,14 @@ async function stepCreateReviews(
           const reviews = { ...(lr.reviews||{}), [key]: r.id };
           writeLastRun({ reviews });
           pendingReviewMap.delete(pendingReviewKey);
-          log.info('Patched review', { reviewer: rev.handle, submitter: submitterHandle, submissionId: submissionIdStr, reviewId });
+          log.info('Patched review', {
+            reviewer: rev.handle,
+            submitter: submitterHandle,
+            submissionId: submissionIdStr,
+            reviewId,
+            score: reviewScore,
+            isPassing: shouldPass
+          });
         } catch (e:any) {
           log.warn('Patch review failed (check submissionId/phaseId requirements in your env)', {
             reviewer: rev.handle,
