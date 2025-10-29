@@ -1115,11 +1115,7 @@ async function stepCreateScreeningReviews(
     return;
   }
 
-  const failureSet = new Set<string>();
-  for (const handle of handles) {
-    const perHandle = submissionsMap[handle] || [];
-    if (perHandle.length) failureSet.add(String(perHandle[0]));
-  }
+  const failureSet = new Set<string>(); // Ensure all screening submissions pass with max scores
 
   const resourcesByHandle = (lr as any).reviewerResourcesByHandle as Record<string, Record<string, string>> | undefined;
   const candidateResourceIds: string[] = [];
