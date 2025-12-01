@@ -2141,13 +2141,57 @@ async function stepAwaitAllClosed(
   ctx?: StepContext
 ) {
   log.info('Waiting for all phases to be closed...');
+  let lastApprovalFailureKey: string | undefined;
   while (true) {
     cancel.check();
     const ch = await TC.getChallenge(token, challengeId);
     logChallengeSnapshot(log, 'awaitAllClosed', ch);
     cancel.check();
     const allClosed = (ch.phases || []).every((p:any) => p.isOpen === false);
-    if (allClosed) { log.info('All phases are closed', undefined, getStepProgress('awaitAllClosed')); return; }
+    if (allClosed) {
+      try {
+        const approvalState = await fetchApprovalReviewState(log, token, challengeId, cancel, ch);
+        const hasApprovalPhase = approvalState.phaseInfo.names.size > 0;
+        const latest = approvalState.latestCompleted;
+
+        if (!hasApprovalPhase) {
+          log.info('All phases are closed (no approval phase present)', undefined, getStepProgress('awaitAllClosed'));
+          return;
+        }
+
+        if (!latest) {
+          log.warn('All phases closed but approval review outcome not available yet; waiting for update');
+        } else {
+          const outcome = latest.outcome;
+          const derivedPassing = outcome.isPassing !== undefined
+            ? outcome.isPassing
+            : ((outcome.score ?? 0) > 0);
+          if (derivedPassing) {
+            log.info(
+              'All phases are closed with passing approval outcome',
+              { approvalReviewId: outcome.reviewId, score: outcome.score },
+              getStepProgress('awaitAllClosed')
+            );
+            return;
+          }
+
+          const failureKey = `${outcome.reviewId ?? 'unknown'}:${outcome.timestamp ?? 0}`;
+          if (failureKey !== lastApprovalFailureKey) {
+            log.warn('Approval review outcome failing despite phases closed; awaiting remediation', {
+              reviewId: outcome.reviewId,
+              score: outcome.score,
+              isPassing: outcome.isPassing,
+              metadataOutcome: outcome.metadataOutcome
+            });
+            lastApprovalFailureKey = failureKey;
+          }
+        }
+      } catch (error: any) {
+        log.warn('Failed to verify approval outcome while waiting for phase closure', {
+          error: error?.message || String(error)
+        });
+      }
+    }
     await (cancel ? cancel.wait(10000) : new Promise(r => setTimeout(r, 10000)));
   }
 }
