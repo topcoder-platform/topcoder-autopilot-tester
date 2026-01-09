@@ -11,6 +11,7 @@ const fullSteps: FlowStep[] = [
   { id: 'token', label: 'Token' },
   { id: 'createChallenge', label: 'Create Challenge' },
   { id: 'updateDraft', label: 'Update Draft' },
+  { id: 'addSkills', label: 'Add Skills' },
   { id: 'activate', label: 'Activate' },
   { id: 'awaitRegSubOpen', label: 'Await Reg/Sub Open' },
   { id: 'assignResources', label: 'Assign Resources' },

@@ -8,6 +8,7 @@ import type {
   TopgearConfig,
   DesignConfig
 } from '../types'
+import { CONFIG_STORAGE_KEY } from '../defaultConfig'
 
 function getFlowConfig(config: AppConfig, flow: FlowVariant): FullChallengeConfig | First2FinishConfig | DesignConfig {
   switch (flow) {
@@ -54,18 +55,27 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
   const [types, setTypes] = useState<any[]>([]);
   const [tracks, setTracks] = useState<any[]>([]);
   const [scorecards, setScorecards] = useState<any[]>([]);
+  const [isRefDataLoading, setIsRefDataLoading] = useState(false);
+  const [refDataError, setRefDataError] = useState<string | null>(null);
+  const [isScorecardsLoading, setIsScorecardsLoading] = useState(false);
+  const [scorecardsError, setScorecardsError] = useState<string | null>(null);
   const [formConfig, setFormConfig] = useState<FullChallengeConfig | First2FinishConfig | DesignConfig>(() => getFlowConfig(config, flow));
   const [listInputs, setListInputs] = useState<ListInputs>({ reviewers: '', reviewer: '', screener: '', approver: '', checkpointScreener: '', checkpointReviewer: '', submitters: '', prizes: '', prize: '' });
   const isFull = flow === 'full';
   const isFullLike = flow === 'full' || flow === 'designSingle';
   const isDesign = flow === 'design' || flow === 'designFailScreening' || flow === 'designFailReview';
   const iterativeLabel = flow === 'topgear' ? 'Topgear Task' : (flow === 'topgearLate' ? 'Topgear Task (Late)' : 'First2Finish');
+  const refDataStatus = isRefDataLoading ? 'Loading challenge types and tracks...' : refDataError;
+  const scorecardsStatus = isScorecardsLoading ? 'Loading scorecards...' : scorecardsError;
+  const isScorecardsDisabled = isScorecardsLoading || Boolean(scorecardsError);
 
   const activeConfig = useMemo(() => getFlowConfig(config, flow), [config, flow]);
 
   useEffect(() => {
     const loadReferenceData = async () => {
       try {
+        setIsRefDataLoading(true);
+        setRefDataError(null);
         const [typesResponse, tracksResponse] = await Promise.all([
           axios.get('/api/refdata/challenge-types'),
           axios.get('/api/refdata/challenge-tracks')
@@ -74,8 +84,11 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
         setTracks(Array.isArray(tracksResponse.data) ? tracksResponse.data : []);
       } catch (error) {
         console.error('Failed to load reference data', error);
+        setRefDataError('Failed to load challenge types and tracks.');
         setTypes([]);
         setTracks([]);
+      } finally {
+        setIsRefDataLoading(false);
       }
     };
     loadReferenceData();
@@ -108,8 +121,10 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
 
   useEffect(() => {
     const loadScores = async () => {
+      setScorecardsError(null);
       if (!formConfig.challengeTypeId || !formConfig.challengeTrackId) {
         setScorecards([]);
+        setIsScorecardsLoading(false);
         return;
       }
       const typeEntry = types.find(t => t.id === formConfig.challengeTypeId);
@@ -118,9 +133,11 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
       const trackCode = trackEntry?.track; // Use the API 'track' value, not the display name
       if (!typeName || !trackCode) {
         setScorecards([]);
+        setIsScorecardsLoading(false);
         return;
       }
       try {
+        setIsScorecardsLoading(true);
         const { data } = await axios.get('/api/refdata/scorecards', {
           params: { challengeType: typeName, challengeTrack: trackCode }
         });
@@ -136,13 +153,16 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
         setScorecards(list);
       } catch (error) {
         console.error('Failed to load scorecards', error);
+        setScorecardsError('Failed to load scorecards.');
         setScorecards([]);
+      } finally {
+        setIsScorecardsLoading(false);
       }
     };
     loadScores();
   }, [formConfig.challengeTypeId, formConfig.challengeTrackId, types, tracks]);
 
-  const save = async (event: React.FormEvent) => {
+  const save = (event: React.FormEvent) => {
     event.preventDefault();
     const payload: AppConfig = {
       ...config,
@@ -154,7 +174,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
       first2finish: flow === 'first2finish' ? formConfig as First2FinishConfig : config.first2finish,
       topgear: (flow === 'topgear' || flow === 'topgearLate') ? formConfig as TopgearConfig : config.topgear
     };
-    await axios.post('/api/config', payload);
+    localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(payload));
     onSaved();
   };
 
@@ -266,7 +286,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
       <div className="row">
         <div className="col">
           <label>Challenge type</label>
-          <select value={formConfig.challengeTypeId} onChange={e => update('challengeTypeId', e.target.value)}>
+          <select value={formConfig.challengeTypeId} onChange={e => update('challengeTypeId', e.target.value)} disabled={isRefDataLoading}>
             <option value="">-- Select --</option>
             {types.map((item: any) => (
               <option key={item.id} value={item.id}>{item.name}</option>
@@ -275,7 +295,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
         </div>
         <div className="col">
           <label>Challenge track</label>
-          <select value={formConfig.challengeTrackId} onChange={e => update('challengeTrackId', e.target.value)}>
+          <select value={formConfig.challengeTrackId} onChange={e => update('challengeTrackId', e.target.value)} disabled={isRefDataLoading}>
             <option value="">-- Select --</option>
             {tracks.map((item: any) => (
               <option key={item.id} value={item.id}>{item.name}</option>
@@ -283,6 +303,11 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
           </select>
         </div>
       </div>
+      {refDataStatus ? (
+        <small style={{ display: 'block', marginTop: 4, color: isRefDataLoading ? '#94a3b8' : '#fca5a5' }}>
+          {refDataStatus}
+        </small>
+      ) : null}
 
       <div className="row">
         <div className="col">
@@ -303,7 +328,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
         {!isDesign ? (
           <div className="col">
             <label>Scorecard</label>
-            <select value={formConfig.scorecardId} onChange={e => update('scorecardId', e.target.value)}>
+            <select value={formConfig.scorecardId} onChange={e => update('scorecardId', e.target.value)} disabled={isScorecardsDisabled}>
               <option value="">-- Select --</option>
               {scorecards.map((item: any) => (
                 <option key={item.id} value={item.id}>{item.name}</option>
@@ -312,6 +337,11 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
           </div>
         ) : null}
       </div>
+      {scorecardsStatus ? (
+        <small style={{ display: 'block', marginTop: 4, color: isScorecardsLoading ? '#94a3b8' : '#fca5a5' }}>
+          {scorecardsStatus}
+        </small>
+      ) : null}
 
       {isDesign ? (
         <div className="row">
@@ -320,6 +350,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
             <select
               value={(formConfig as DesignConfig).reviewScorecardId || formConfig.scorecardId}
               onChange={e => update('reviewScorecardId', e.target.value)}
+              disabled={isScorecardsDisabled}
             >
               <option value="">-- Select --</option>
               {scorecards.map((item: any) => (
@@ -332,6 +363,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
             <select
               value={(formConfig as DesignConfig).screeningScorecardId || formConfig.scorecardId}
               onChange={e => update('screeningScorecardId', e.target.value)}
+              disabled={isScorecardsDisabled}
             >
               <option value="">-- Select --</option>
               {scorecards.map((item: any) => (
@@ -344,6 +376,7 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
             <select
               value={(formConfig as DesignConfig).approvalScorecardId || formConfig.scorecardId}
               onChange={e => update('approvalScorecardId', e.target.value)}
+              disabled={isScorecardsDisabled}
             >
               <option value="">-- Select --</option>
               {scorecards.map((item: any) => (
@@ -358,7 +391,11 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
         <div className="row">
           <div className="col">
             <label>Checkpoint Screening Scorecard</label>
-            <select value={(formConfig as DesignConfig).checkpointScreeningScorecardId || (formConfig as DesignConfig).checkpointScorecardId} onChange={e => update('checkpointScreeningScorecardId', e.target.value)}>
+            <select
+              value={(formConfig as DesignConfig).checkpointScreeningScorecardId || (formConfig as DesignConfig).checkpointScorecardId}
+              onChange={e => update('checkpointScreeningScorecardId', e.target.value)}
+              disabled={isScorecardsDisabled}
+            >
               <option value="">-- Select --</option>
               {scorecards.map((item: any) => (
                 <option key={item.id} value={item.id}>{item.name}</option>
@@ -367,7 +404,11 @@ export default function ConfigForm({ flow, config, onSaved }: Props) {
           </div>
           <div className="col">
             <label>Checkpoint Review Scorecard</label>
-            <select value={(formConfig as DesignConfig).checkpointReviewScorecardId || (formConfig as DesignConfig).checkpointScorecardId} onChange={e => update('checkpointReviewScorecardId', e.target.value)}>
+            <select
+              value={(formConfig as DesignConfig).checkpointReviewScorecardId || (formConfig as DesignConfig).checkpointScorecardId}
+              onChange={e => update('checkpointReviewScorecardId', e.target.value)}
+              disabled={isScorecardsDisabled}
+            >
               <option value="">-- Select --</option>
               {scorecards.map((item: any) => (
                 <option key={item.id} value={item.id}>{item.name}</option>

@@ -1,12 +1,19 @@
 
 import { Router } from 'express';
-import { getToken, axiosWithAuth } from '../services/topcoder.js';
+import { authenticateJWT } from '../middleware/auth.middleware.js';
+import { axiosWithAuth } from '../services/topcoder.js';
 
 const router = Router();
 
+router.use(authenticateJWT);
+
 router.get('/challenge-types', async (req, res) => {
   try {
-    const token = await getToken();
+    const token = req.user?.token;
+    if (!token) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
     const ax = axiosWithAuth(token);
     const { data } = await ax.get('https://api.topcoder-dev.com/v6/challenge-types');
     res.json(data);
@@ -17,7 +24,11 @@ router.get('/challenge-types', async (req, res) => {
 
 router.get('/challenge-tracks', async (req, res) => {
   try {
-    const token = await getToken();
+    const token = req.user?.token;
+    if (!token) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
     const ax = axiosWithAuth(token);
     const { data } = await ax.get('https://api.topcoder-dev.com/v6/challenge-tracks');
     res.json(data);
@@ -37,9 +48,14 @@ router.get('/scorecards', async (req, res) => {
       });
     }
 
+    const token = req.user?.token;
+    if (!token) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
     const trackParam = trackParamRaw.toUpperCase();
 
-    const token = await getToken();
     const ax = axiosWithAuth(token);
     const { data } = await ax.get(`https://api.topcoder-dev.com/v6/scorecards`, {
       params: {

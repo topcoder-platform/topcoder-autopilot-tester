@@ -29,6 +29,7 @@ type StepEvent = {
   timestamp: string;
 };
 type StepRequestMap = Partial<Record<StepName, StepRequestLog[]>>;
+type StreamErrorState = { message: string; isFinal: boolean };
 
 const highlightJson = (value: unknown) => {
   if (value === undefined) return '';
@@ -70,6 +71,10 @@ const STATUS_UI: Record<StepStatus, { icon: string; color: string; label: string
   success: { icon: '✓', color: '#22c55e', label: 'Success' },
   failure: { icon: '✕', color: '#ef4444', label: 'Failure' }
 };
+
+const STREAM_RECONNECT_LIMIT = 3;
+const STREAM_RECONNECT_BASE_DELAY_MS = 1000;
+const STREAM_RECONNECT_MAX_DELAY_MS = 8000;
 
 const stringifyValue = (value: unknown): string => {
   if (value === undefined || value === null) return '—';
@@ -226,6 +231,7 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [streamError, setStreamError] = useState<StreamErrorState | null>(null);
   const [challengeSnapshots, setChallengeSnapshots] = useState<ChallengeSnapshot[]>([]);
   const [challengeId, setChallengeId] = useState<string | null>(null);
   const [refreshCount, setRefreshCount] = useState(0);
@@ -245,6 +251,9 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
   const [selectedRequest, setSelectedRequest] = useState<{ step: StepName; item: StepRequestLog } | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const sourceRef = useRef<EventSource | null>(null);
+  const streamCompletedRef = useRef(false);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const snapshotCounterRef = useRef(0);
   const copyTooltipTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reviewFetchControllerRef = useRef<AbortController | null>(null);
@@ -260,11 +269,18 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
 
   useEffect(() => {
     if (runToken === 0) return;
+    let isActive = true;
     const params = new URLSearchParams({ mode, flow });
     if (toStep) params.set('toStep', toStep);
-    const es = new EventSource(`/api/run/stream?${params.toString()}`);
-    sourceRef.current = es;
-    setIsRunning(true);
+    const streamUrl = `/api/run/stream?${params.toString()}`;
+    streamCompletedRef.current = false;
+    reconnectAttemptRef.current = 0;
+    setStreamError(null);
+
+    const appendLog = (entry: LogEntry) => {
+      setLogs(prev => [...prev, entry]);
+      logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+    };
 
     const handleStepEvent = (event: StepEvent) => {
       setStepStatuses(prev => ({ ...prev, [event.step]: event.status }));
@@ -289,66 +305,137 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
       }
     };
 
-    es.onmessage = (ev) => {
-      try {
-        const parsed = JSON.parse(ev.data);
-        if (parsed?.type === 'step') {
-          handleStepEvent(parsed as StepEvent);
+    const openStream = () => {
+      const es = new EventSource(streamUrl);
+      sourceRef.current = es;
+      setIsRunning(true);
+
+      es.onopen = () => {
+        if (!isActive) return;
+        if (reconnectAttemptRef.current > 0) {
+          appendLog({
+            level: 'info',
+            message: `Run stream reconnected on attempt ${reconnectAttemptRef.current}.`
+          });
+        }
+        reconnectAttemptRef.current = 0;
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
+        }
+        setStreamError(null);
+      };
+
+      es.onmessage = (ev) => {
+        if (!isActive) return;
+        try {
+          const parsed = JSON.parse(ev.data);
+          if (parsed?.type === 'step') {
+            handleStepEvent(parsed as StepEvent);
+            return;
+          }
+          const data: LogEntry = parsed;
+          if (typeof data.progress === 'number') setProgress(data.progress);
+
+          let shouldLog = true;
+          if (data.message === 'Challenge refresh' && data.data?.challenge) {
+            snapshotCounterRef.current += 1;
+            setRefreshCount(snapshotCounterRef.current);
+            const stage = typeof data.data.stage === 'string' ? data.data.stage : undefined;
+            const currentChallenge = data.data.challenge;
+            const extractedId = (() => {
+              if (!currentChallenge) return null;
+              const idCandidate = currentChallenge.id ?? currentChallenge.challengeId ?? currentChallenge.challenge?.id;
+              if (typeof idCandidate === 'string' || typeof idCandidate === 'number') return String(idCandidate);
+              return null;
+            })();
+            if (extractedId) setChallengeId(extractedId);
+            if (copyTooltipTimeoutRef.current) {
+              clearTimeout(copyTooltipTimeoutRef.current);
+              copyTooltipTimeoutRef.current = null;
+            }
+            setIsCopyTooltipVisible(false);
+            const timestamp = new Date().toISOString();
+            setLastRefreshTimestamp(timestamp);
+            setChallengeSnapshots([{
+              id: snapshotCounterRef.current,
+              stage,
+              timestamp,
+              challenge: currentChallenge
+            }]);
+            shouldLog = false;
+          }
+
+          const normalized = data.message?.toLowerCase?.() || '';
+          if (normalized.includes('run finished') || normalized.includes('run cancelled') || data.level === 'error' || data.progress === 100) {
+            streamCompletedRef.current = true;
+            setIsRunning(false);
+          }
+
+          if (shouldLog) appendLog(data);
+        } catch {
+          // ignore malformed log entries
+        }
+      };
+
+      es.onerror = () => {
+        if (!isActive) return;
+        if (streamCompletedRef.current) {
+          es.close();
+          if (sourceRef.current === es) sourceRef.current = null;
           return;
         }
-        const data: LogEntry = parsed;
-        if (typeof data.progress === 'number') setProgress(data.progress);
+        if (reconnectTimeoutRef.current) return;
 
-        let shouldLog = true;
-        if (data.message === 'Challenge refresh' && data.data?.challenge) {
-          snapshotCounterRef.current += 1;
-          setRefreshCount(snapshotCounterRef.current);
-          const stage = typeof data.data.stage === 'string' ? data.data.stage : undefined;
-          const currentChallenge = data.data.challenge;
-          const extractedId = (() => {
-            if (!currentChallenge) return null;
-            const idCandidate = currentChallenge.id ?? currentChallenge.challengeId ?? currentChallenge.challenge?.id;
-            if (typeof idCandidate === 'string' || typeof idCandidate === 'number') return String(idCandidate);
-            return null;
-          })();
-          if (extractedId) setChallengeId(extractedId);
-          if (copyTooltipTimeoutRef.current) {
-            clearTimeout(copyTooltipTimeoutRef.current);
-            copyTooltipTimeoutRef.current = null;
-          }
-          setIsCopyTooltipVisible(false);
-          const timestamp = new Date().toISOString();
-          setLastRefreshTimestamp(timestamp);
-          setChallengeSnapshots([{
-            id: snapshotCounterRef.current,
-            stage,
-            timestamp,
-            challenge: currentChallenge
-          }]);
-          shouldLog = false;
+        es.close();
+        if (sourceRef.current === es) sourceRef.current = null;
+
+        const nextAttempt = reconnectAttemptRef.current + 1;
+        reconnectAttemptRef.current = nextAttempt;
+
+        if (nextAttempt <= STREAM_RECONNECT_LIMIT) {
+          const delayMs = Math.min(
+            STREAM_RECONNECT_MAX_DELAY_MS,
+            STREAM_RECONNECT_BASE_DELAY_MS * Math.pow(2, nextAttempt - 1)
+          );
+          const delaySeconds = Math.ceil(delayMs / 1000);
+          const message = `Run stream disconnected. Reconnecting in ${delaySeconds}s (attempt ${nextAttempt} of ${STREAM_RECONNECT_LIMIT}).`;
+          setStreamError({ message, isFinal: false });
+          appendLog({
+            level: 'error',
+            message: 'Run stream disconnected. Attempting to reconnect.',
+            data: { attempt: nextAttempt, maxAttempts: STREAM_RECONNECT_LIMIT, delayMs }
+          });
+          reconnectTimeoutRef.current = setTimeout(() => {
+            reconnectTimeoutRef.current = null;
+            if (!isActive) return;
+            openStream();
+          }, delayMs);
+          return;
         }
 
-        const normalized = data.message?.toLowerCase?.() || '';
-        if (normalized.includes('run finished') || normalized.includes('run cancelled') || data.level === 'error' || data.progress === 100) {
-          setIsRunning(false);
-        }
+        const finalMessage = 'Run stream disconnected. Unable to reconnect; please restart the run.';
+        setStreamError({ message: finalMessage, isFinal: true });
+        appendLog({ level: 'error', message: finalMessage });
+        streamCompletedRef.current = true;
+        setIsRunning(false);
+      };
 
-        if (shouldLog) setLogs(prev => [...prev, data]);
-        logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
-      } catch {
-        // ignore malformed log entries
-      }
+      return es;
     };
 
-    es.onerror = () => {
-      es.close();
-      if (sourceRef.current === es) sourceRef.current = null;
-      setIsRunning(false);
-    };
+    openStream();
 
     return () => {
-      es.close();
-      if (sourceRef.current === es) sourceRef.current = null;
+      isActive = false;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (sourceRef.current) {
+        sourceRef.current.close();
+        sourceRef.current = null;
+      }
     };
   }, [runToken, mode, toStep, flow]);
 
@@ -437,12 +524,19 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
       sourceRef.current.close();
       sourceRef.current = null;
     }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    reconnectAttemptRef.current = 0;
+    streamCompletedRef.current = false;
     if (reviewFetchControllerRef.current) {
       reviewFetchControllerRef.current.abort();
       reviewFetchControllerRef.current = null;
     }
     setIsRunning(false);
     setLogs([]);
+    setStreamError(null);
     setChallengeSnapshots([]);
     setChallengeId(null);
     setRefreshCount(0);
@@ -506,6 +600,26 @@ export default function Runner({ flow, mode, toStep }: { flow: FlowVariant; mode
       <div className="col" style={{ minWidth: 0 }}>
         <div className="card" style={{ height: '100%' }}>
           <h3>Run</h3>
+          {streamError ? (
+            <div
+              role="alert"
+              style={{
+                margin: '8px 0 12px',
+                padding: '8px 12px',
+                borderRadius: 8,
+                border: `1px solid ${streamError.isFinal ? '#b91c1c' : '#b45309'}`,
+                background: streamError.isFinal ? '#3f1a1a' : '#3b2413',
+                color: streamError.isFinal ? '#fee2e2' : '#fef3c7',
+                fontSize: 13,
+                fontWeight: 500
+              }}
+            >
+              <span style={{ fontWeight: 700, marginRight: 6 }}>
+                {streamError.isFinal ? 'Stream error:' : 'Stream warning:'}
+              </span>
+              {streamError.message}
+            </div>
+          ) : null}
           <div className="progress" style={{marginBottom: 8}}><div className="bar" style={{ width: progress+'%' }} /></div>
           <div style={{display:'flex', gap:8, marginBottom: 8}}>
             <button onClick={startRun}>{isRunning ? 'Restart' : 'Start'}</button>

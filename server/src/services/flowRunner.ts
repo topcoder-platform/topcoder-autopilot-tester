@@ -64,7 +64,7 @@ function createCancellationHelpers(signal: AbortSignal | undefined, log: RunnerL
 
 export type RunMode = 'full' | 'toStep';
 export type StepName =
-  | 'token' | 'createChallenge' | 'updateDraft' | 'activate'
+  | 'token' | 'createChallenge' | 'updateDraft' | 'addSkills' | 'activate'
   | 'awaitRegSubOpen' | 'assignResources' | 'createSubmissions'
   | 'awaitReviewOpen' | 'createReviews' | 'awaitAppealsOpen'
   | 'createAppeals' | 'awaitAppealsResponseOpen' | 'appealResponses'
@@ -90,9 +90,18 @@ function maybeStop(mode: RunMode, toStep: AnyStepName | undefined, current: AnyS
 const DEFAULT_REVIEW_PHASE_ID = 'aa5a3f78-79e0-4bf7-93ff-b11e8f5b398b';
 const DEFAULT_REVIEWER_BASE_COEFFICIENT = 0.5;
 const DEFAULT_REVIEWER_INCREMENTAL_COEFFICIENT = 0.2;
+// Seeded standardized skill IDs for challenge assignment.
+const DEFAULT_CHALLENGE_SKILL_IDS = [
+  '63bb7cfc-b0d4-4584-820a-18c503b4b0fe',
+  '16ee1403-8e73-497d-a766-623eefd3c806',
+  'fcbac194-35ab-4a31-aa7c-a2867fff9c4b',
+  '6390a56f-197e-445a-8ad2-3d8758ecea9f',
+  'eafd9c8e-4857-48a2-92ee-4c07bee9abd5',
+  'a5ada71d-abc1-4209-a205-96cbc191b3f2'
+];
 
 const STEPS: StepName[] = [
-  'token','createChallenge','updateDraft','activate',
+  'token','createChallenge','updateDraft','addSkills','activate',
   'awaitRegSubOpen','assignResources','createSubmissions',
   'awaitReviewOpen','createReviews','awaitAppealsOpen',
   'createAppeals','awaitAppealsResponseOpen','appealResponses',
@@ -181,6 +190,19 @@ function toStringId(value: unknown) {
   if (typeof value === 'string' && value.trim()) return value;
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return undefined;
+}
+
+function pickRandomSkillIds(skillIds: string[], minCount: number, maxCount: number): string[] {
+  const pool = Array.from(new Set(skillIds)).filter(Boolean);
+  if (!pool.length) return [];
+  const max = Math.min(pool.length, Math.max(minCount, maxCount));
+  const min = Math.min(minCount, max);
+  const targetCount = min === max ? min : Math.floor(Math.random() * (max - min + 1)) + min;
+  for (let i = pool.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, targetCount);
 }
 
 async function resolvePhaseIdByName(
@@ -351,6 +373,9 @@ export async function runFlow(
   maybeStop(mode, toStep, 'createChallenge', log);
   await withStep(log, 'updateDraft', (ctx) => stepUpdateDraft(log, token, cfg, challenge.id, cancel, ctx));
   maybeStop(mode, toStep, 'updateDraft', log);
+  cancel.check();
+  await withStep(log, 'addSkills', (ctx) => stepAddSkills(log, token, challenge.id, cancel, ctx));
+  maybeStop(mode, toStep, 'addSkills', log);
   cancel.check();
   await withStep(log, 'activate', (ctx) => stepActivate(log, token, challenge.id, cancel, ctx));
   maybeStop(mode, toStep, 'activate', log);
@@ -596,7 +621,6 @@ async function stepUpdateDraft(
       }
     ],
     task: { isTask: false, isAssigned: false },
-    skills: [{ name: 'Java', id: '63bb7cfc-b0d4-4584-820a-18c503b4b0fe' }],
     legacy: {
       reviewType: 'COMMUNITY',
       confidentialityType: 'public',
@@ -620,6 +644,32 @@ async function stepUpdateDraft(
     scorecardId: cfg.scorecardId
   });
   return updated;
+}
+
+async function stepAddSkills(
+  log: RunnerLogger,
+  token: string,
+  challengeId: string,
+  cancel: CancellationHelpers,
+  ctx?: StepContext
+) {
+  cancel.check();
+  const skillIds = pickRandomSkillIds(DEFAULT_CHALLENGE_SKILL_IDS, 2, 4);
+  const uniqueSkillIds = Array.from(new Set(skillIds));
+  if (uniqueSkillIds.length < 2) {
+    throw new Error('Not enough skills available to assign to the challenge.');
+  }
+  if (uniqueSkillIds.length !== skillIds.length) {
+    log.warn('Duplicate skill IDs removed before assignment', {
+      challengeId,
+      removedCount: skillIds.length - uniqueSkillIds.length
+    });
+  }
+  log.info('Adding standardized skills to challenge...', { challengeId, skillIds: uniqueSkillIds });
+  await TC.setChallengeSkills(token, challengeId, uniqueSkillIds);
+  cancel.check();
+  log.info('Challenge skills added', { challengeId, count: uniqueSkillIds.length }, getStepProgress('addSkills'));
+  return uniqueSkillIds;
 }
 
 async function stepUpdateDraftDesignSingle(

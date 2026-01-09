@@ -251,6 +251,13 @@ export const TC = {
     const { data } = await ax.post(`https://api.topcoder-dev.com/v6/appeals/${appealId}/response`, payload);
     return data;
   },
+  async setChallengeSkills(token: string, challengeId: string, skillIds: string[]) {
+    const ax = axiosWithAuth(token);
+    const { data } = await ax.post(`https://api.topcoder-dev.com/v5/standardized-skills/challenge-skills/${challengeId}`, {
+      skillIds
+    });
+    return data;
+  },
   // NOTE: The exact endpoint to update review item scores may vary.
   // If your environment exposes a dedicated endpoint, adjust here.
   async updateReviewItem(token: string, reviewItemId: string, payload: any) {

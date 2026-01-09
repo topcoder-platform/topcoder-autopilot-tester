@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import axios from 'axios'
 import ConfigTable from './components/ConfigTable'
 import ConfigForm from './components/ConfigForm'
 import Runner from './components/Runner'
 import type { AppConfig, FlowVariant } from './types'
 import { FLOW_DEFINITIONS, ORDERED_FLOW_KEYS } from './flows'
+import { CONFIG_STORAGE_KEY, createDefaultAppConfig } from './defaultConfig'
 
 type ViewState = 'home' | 'edit' | 'runFull' | 'runToStep'
 
@@ -47,9 +47,23 @@ export default function App() {
   const [toStepState, setToStepState] = useState<Record<FlowVariant, string>>(initialToStepState)
   const [activeFlow, setActiveFlow] = useState<FlowVariant>('full')
 
-  const loadConfig = async () => {
-    const { data } = await axios.get<AppConfig>('/api/config')
-    setConfig(data)
+  const loadConfig = () => {
+    const stored = localStorage.getItem(CONFIG_STORAGE_KEY)
+    let parsed: AppConfig | null = null
+    if (stored) {
+      try {
+        parsed = JSON.parse(stored) as AppConfig | null
+      } catch (error) {
+        parsed = null
+      }
+    }
+    if (parsed) {
+      setConfig(parsed)
+      return
+    }
+    const fallback = createDefaultAppConfig()
+    localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(fallback))
+    setConfig(fallback)
   }
 
   useEffect(() => {
