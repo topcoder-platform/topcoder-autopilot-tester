@@ -19,23 +19,13 @@ pnpm run install:all
 ```
 
 
-Copy the sample file:
+Supply runtime Keycloak environment settings instead of a secrets JSON file.
 
-```bash
-cp server/secrets/m2m.sample.json server/secrets/m2m.json
-```
-Edit `m2m.json` with your Client ID and Client Secret:
-
-```json
-{
-  "tokenUrl": "https://topcoder-dev.auth0.com/oauth/token",
-  "audience": "https://m2m.topcoder-dev.com/",
-  "clientId": "YOUR_CLIENT_ID",
-  "clientSecret": "YOUR_CLIENT_SECRET"
-}
-```
-
-**This file is ignored by git and must never be committed.**
+Set `M2M_PROVIDER=keycloak`, `KEYCLOAK_ISSUER`, `KEYCLOAK_AUDIENCE`,
+`KEYCLOAK_TOKEN_URL`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_CLIENT_SECRET`, and reviewed
+`KEYCLOAK_SCOPE`. Do not put these in Vite/browser settings. Configure member trust
+with JSON-array `VALID_ISSUERS` and `AUTH_USER_AUDIENCES` (or explicit
+`ALLOW_LEGACY_USER_AUDIENCE=true`), plus `AUTH_SECRET` only for existing HMAC members.
 
 ```bash
 pnpm run dev
@@ -111,3 +101,14 @@ After a run, `server/data/last-run.json` contains:
 ```
 
 This helps with debugging, replaying, or continuing partial runs.
+
+## Keycloak branch validation
+
+`keycloak_m2M` pins core `4.0.0-keycloak.0` at immutable commit `c262f4a`.
+Run `cd server`, `nvm use`, `pnpm install`, `pnpm lint`, `pnpm build`, and
+`pnpm test:keycloak`. The server requires Node 22.23.2. The client is unchanged.
+Service issuance validates signature, issuer, audience, client, lifetime, and scopes
+before forwarding tokens and does not record credentials or token responses.
+Member reference-data routes verify signatures and reject service principals.
+Test-run workflows create/update DEV data; validation tests mock those APIs and
+must not start actual challenge runs. This branch has no deployment workflow.

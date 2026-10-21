@@ -1,20 +1,9 @@
 
 import axios from 'axios';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import core from 'tc-core-library-js';
 import { recordStepRequest } from '../utils/stepRequestRecorder.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-type M2MSecrets = {
-  tokenUrl: string;
-  audience: string;
-  clientId: string;
-  clientSecret: string;
-};
-let cachedToken: { token: string; exp: number } | null = null;
+let tokenProvider: ReturnType<typeof core.auth.m2m> | undefined;
 
 const METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH']);
 
@@ -27,57 +16,15 @@ function normalizeRequestBody(data: unknown) {
   }
 }
 
+/**
+ * Return a verified cached Keycloak service token for DEV test-runner API calls.
+ * Runtime KEYCLOAK_* settings are the only inputs; no secret file is read.
+ * Returns the bearer token or throws a sanitized shared-core configuration/issuance error.
+ * Token requests and responses never enter the run-step recorder.
+ */
 export async function getToken(): Promise<string> {
-  const secretPath = path.resolve(__dirname, '../../secrets/m2m.json');
-  if (!fs.existsSync(secretPath)) {
-    throw new Error(`Missing secrets/m2m.json. Copy secrets/m2m.sample.json and fill your clientId/clientSecret.`);
-  }
-  const secrets: M2MSecrets = JSON.parse(fs.readFileSync(secretPath, 'utf-8'));
-  const now = Math.floor(Date.now() / 1000);
-  if (cachedToken && cachedToken.exp - 60 > now) return cachedToken.token;
-
-  const payload = {
-    fresh_token: true,
-    client_id: secrets.clientId,
-    client_secret: secrets.clientSecret,
-    audience: secrets.audience,
-    grant_type: 'client_credentials'
-  };
-
-  try {
-    const response = await axios.post(secrets.tokenUrl, payload, { headers: { 'content-type': 'application/json' } });
-    recordStepRequest({
-      method: 'POST',
-      endpoint: secrets.tokenUrl,
-      status: response.status,
-      requestBody: payload,
-      responseBody: response.data,
-      responseHeaders: response.headers,
-      timestamp: new Date().toISOString(),
-      outcome: 'success'
-    });
-    const token = response.data.access_token;
-    const decoded = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString('utf-8'));
-    cachedToken = { token, exp: decoded.exp || (now + 3600) };
-    return token;
-  } catch (error: any) {
-    const response = error?.response;
-    const recorded = recordStepRequest({
-      method: 'POST',
-      endpoint: secrets.tokenUrl,
-      status: response?.status,
-      message: error?.message,
-      requestBody: payload,
-      responseBody: response?.data,
-      responseHeaders: response?.headers,
-      timestamp: new Date().toISOString(),
-      outcome: 'failure'
-    });
-    if (recorded) {
-      (error as any).__stepRequestId = recorded.id;
-    }
-    throw error;
-  }
+  if (!tokenProvider) tokenProvider = core.auth.m2m();
+  return tokenProvider.getMachineToken();
 }
 
 export function axiosWithAuth(token: string) {
